@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Vexel",
+  "productName": "Veltrax Studios",
   "version": "0.1.0",
-  "identifier": "dev.pages.craftersapex.vexel",
+  "identifier": "dev.pages.craftersapex.veltrax",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Vexel",
+        "title": "Veltrax Studios",
         "width": 1280,
         "height": 800,
         "minWidth": 960,

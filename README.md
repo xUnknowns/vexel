@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="src-tauri/icons/icon.png" width="96" alt="Vexel logo" />
+<img src="src-tauri/icons/icon.png" width="96" alt="Veltrax Studios logo" />
 
-# Vexel
+# Veltrax Studios
 
 ### *The image editor built for people who don't design — powered by AI.*
 
@@ -18,15 +18,15 @@
 
 ---
 
-## What is Vexel?
+## What is Veltrax Studios?
 
 You don't need a design degree to make something look great.
 
-**Vexel** is an ultra-fast, free and open-source desktop image editor for Windows, built from the ground up for the person who *just needs it to work*. No overwhelming menus. No subscription walls. No bloat. Just a clean, dark workspace where your images transform in milliseconds, powered by a native **Rust** processing engine under the hood.
+**Veltrax Studios** is an ultra-fast, free and open-source desktop image editor for Windows, built from the ground up for the person who *just needs it to work*. No overwhelming menus. No subscription walls. No bloat. Just a clean, dark workspace where your images transform in milliseconds, powered by a native **Rust** processing engine under the hood.
 
-But Vexel is more than a simple editor.
+But Veltrax Studios is more than a simple editor.
 
-Its central philosophy is the seamless union of **human creativity and artificial intelligence**. Through the **Model Context Protocol (MCP)**, Vexel connects directly to Claude AI — letting you describe what you want in plain language and watch the editor carry it out. Want to remove noise, adjust the mood, or apply a complex filter sequence? Just ask. Vexel's MCP bridge translates your words into precise, non-destructive image operations without you writing a single line of code or knowing what "curves" means.
+Its central philosophy is the seamless union of **human creativity and artificial intelligence**. Through the **Model Context Protocol (MCP)**, Veltrax Studios connects directly to Claude AI — letting you describe what you want in plain language and watch the editor carry it out. Want to remove noise, adjust the mood, or apply a complex filter sequence? Just ask. Veltrax Studios' MCP bridge translates your words into precise, non-destructive image operations without you writing a single line of code or knowing what "curves" means.
 
 > **Built for the non-designer. Powered by AI. Free forever.**
 
@@ -95,14 +95,14 @@ Every push to `main` triggers a CircleCI Windows pipeline that:
 1. Installs Node.js LTS + Rust stable
 2. Caches the Cargo registry
 3. Runs `npm run tauri build`
-4. Stores the installer bundle under **Artifacts → `vexel-windows-bundle`**
+4. Stores the installer bundle under **Artifacts → `veltrax-studios-windows-bundle`**
 
 ---
 
 ## Project Structure
 
 ```
-Vexel/
+Veltrax-Studios/
 ├── .circleci/config.yml              CircleCI Windows pipeline
 ├── src/
 │   ├── App.svelte                    Full UI — Dashboard / Editor / MCP view
@@ -158,6 +158,6 @@ limitations under the License.
 
 Made with ❤️ and Rust by **Crafters Apex**
 
-*If Vexel saved you time, leave a ⭐ — it means the world.*
+*If Veltrax Studios saved you time, leave a ⭐ — it means the world.*
 
 </div>

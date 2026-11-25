@@ -1,4 +1,4 @@
-name: Build Vexel for Windows
+name: Build Veltrax Studios for Windows
 
 on:
   push:
@@ -46,7 +46,7 @@ jobs:
       - name: Upload Windows installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vexel-windows-bundle
+          name: veltrax-studios-windows-bundle
           path: src-tauri/target/release/bundle
           if-no-files-found: error
           retention-days: 30

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capabilities for Vexel",
+  "description": "Default capabilities for Veltrax Studios",
   "windows": ["main"],
   "permissions": [
     "core:default",
