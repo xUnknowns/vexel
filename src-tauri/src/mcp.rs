@@ -1,53 +1,347 @@
 use crate::layers::{
-    parse_hex_color, Layer, LayerEffects, LayerKind, LayerOutline, SharedProjectState,
+    parse_hex_color, BgGradient, Layer, LayerEffects, LayerKind, LayerOutline, SharedProjectState,
 };
 use crate::tools::{internal_get_preview_base64, render_and_respond};
 use serde_json::{json, Value};
 use std::io::{BufRead, Read, Write};
 use tauri::Emitter;
 
-// ── Connect to Claude Desktop ───────────────────────────────────────────────
+// ── Universal MCP Auto-Connector ────────────────────────────────────────────
+
+#[derive(Clone, serde::Serialize)]
+pub struct AiClientStatus {
+    pub id: String,
+    pub name: String,
+    pub installed: bool,
+    pub connected: bool,
+    pub config_path: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct McpSnippets {
+    pub exe_path: String,
+    pub exe_command: String,
+    pub json_snippet: String,
+}
+
+fn appdata_dir() -> String {
+    std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\Public\AppData\Roaming".to_string())
+}
+
+fn local_appdata_dir() -> String {
+    std::env::var("LOCALAPPDATA")
+        .unwrap_or_else(|_| r"C:\Users\Public\AppData\Local".to_string())
+}
+
+fn userprofile_dir() -> String {
+    std::env::var("USERPROFILE").unwrap_or_else(|_| r"C:\Users\Public".to_string())
+}
+
+fn json_has_veltrax(path: &std::path::Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    if let Ok(raw) = std::fs::read_to_string(path) {
+        if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+            return v
+                .get("mcpServers")
+                .and_then(|s| s.get("veltrax-studios"))
+                .is_some();
+        }
+    }
+    false
+}
+
+fn toml_has_veltrax(path: &std::path::Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    std::fs::read_to_string(path)
+        .map(|raw| raw.contains("[mcp_servers.veltrax-studios]"))
+        .unwrap_or(false)
+}
 
 #[tauri::command]
-pub fn connect_claude_desktop() -> Result<String, String> {
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("Failed to get executable path: {}", e))?;
+pub fn scan_desktop_ai_clients() -> Vec<AiClientStatus> {
+    let appdata = appdata_dir();
+    let local_appdata = local_appdata_dir();
+    let userprofile = userprofile_dir();
 
-    let appdata = std::env::var("APPDATA")
-        .unwrap_or_else(|_| r"C:\Users\Public\AppData\Roaming".to_string());
+    let claude_dir = std::path::Path::new(&appdata).join("Claude");
+    let claude_local = std::path::Path::new(&local_appdata).join("AnthropicClaude");
+    let claude_cfg = claude_dir.join("claude_desktop_config.json");
 
-    let config_dir = std::path::Path::new(&appdata).join("Claude");
-    let config_path = config_dir.join("claude_desktop_config.json");
+    let lmstudio_dir = std::path::Path::new(&userprofile).join(".lmstudio");
+    let lmstudio_cfg = lmstudio_dir.join("mcp.json");
 
-    std::fs::create_dir_all(&config_dir)
-        .map_err(|e| format!("Failed to create Claude directory: {}", e))?;
+    let codex_dir = std::path::Path::new(&userprofile).join(".codex");
+    let codex_cfg = codex_dir.join("config.toml");
 
+    let cursor_dir = std::path::Path::new(&userprofile).join(".cursor");
+    let cursor_cfg = cursor_dir.join("mcp.json");
+
+    vec![
+        AiClientStatus {
+            id: "claude".to_string(),
+            name: "Claude Desktop".to_string(),
+            installed: claude_dir.exists() || claude_local.exists(),
+            connected: json_has_veltrax(&claude_cfg),
+            config_path: claude_cfg.display().to_string(),
+        },
+        AiClientStatus {
+            id: "lmstudio".to_string(),
+            name: "LM Studio".to_string(),
+            installed: lmstudio_dir.exists(),
+            connected: json_has_veltrax(&lmstudio_cfg),
+            config_path: lmstudio_cfg.display().to_string(),
+        },
+        AiClientStatus {
+            id: "codex".to_string(),
+            name: "ChatGPT / Codex".to_string(),
+            installed: codex_dir.exists(),
+            connected: toml_has_veltrax(&codex_cfg),
+            config_path: codex_cfg.display().to_string(),
+        },
+        AiClientStatus {
+            id: "cursor".to_string(),
+            name: "Cursor".to_string(),
+            installed: cursor_dir.exists(),
+            connected: json_has_veltrax(&cursor_cfg),
+            config_path: cursor_cfg.display().to_string(),
+        },
+    ]
+}
+
+fn write_json_mcp_entry(config_path: &std::path::Path, exe_str: &str) -> Result<(), String> {
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
+    }
     let mut config: Value = if config_path.exists() {
-        let raw = std::fs::read_to_string(&config_path).unwrap_or_default();
-        serde_json::from_str(&raw).unwrap_or(json!({}))
+        let raw = std::fs::read_to_string(config_path).unwrap_or_default();
+        serde_json::from_str(&raw).unwrap_or_else(|_| json!({}))
     } else {
         json!({})
     };
-
-    if config.get("mcpServers").is_none() {
+    if config.get("mcpServers").is_none() || !config["mcpServers"].is_object() {
         config["mcpServers"] = json!({});
     }
-
     config["mcpServers"]["veltrax-studios"] = json!({
-        "command": exe_path.to_string_lossy().replace('\\', "/"),
-        "args": ["--mcp"],
-        "description": "Veltrax Studios non-destructive layer editor by Crafters Apex"
+        "command": exe_str,
+        "args": ["--mcp"]
     });
-
     let pretty = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
-    std::fs::write(&config_path, pretty)
-        .map_err(|e| format!("Failed to write config: {}", e))?;
+    std::fs::write(config_path, pretty).map_err(|e| format!("Failed to write config: {}", e))
+}
 
-    Ok(format!(
-        "Veltrax Studios connected to Claude Desktop.\nConfig written to: {}",
-        config_path.display()
-    ))
+#[tauri::command]
+pub fn connect_ai_client(client_id: String) -> Result<String, String> {
+    let exe_path = std::env::current_exe()
+        .map_err(|e| format!("Failed to get executable path: {}", e))?;
+    let exe_str = exe_path.to_string_lossy().replace('\\', "/");
+
+    let appdata = appdata_dir();
+    let userprofile = userprofile_dir();
+
+    match client_id.as_str() {
+        "claude" => {
+            let cfg = std::path::Path::new(&appdata)
+                .join("Claude")
+                .join("claude_desktop_config.json");
+            write_json_mcp_entry(&cfg, &exe_str)?;
+            Ok(format!("Connected to Claude Desktop ({})", cfg.display()))
+        }
+        "lmstudio" => {
+            let cfg = std::path::Path::new(&userprofile)
+                .join(".lmstudio")
+                .join("mcp.json");
+            write_json_mcp_entry(&cfg, &exe_str)?;
+            Ok(format!("Connected to LM Studio ({})", cfg.display()))
+        }
+        "cursor" => {
+            let cfg = std::path::Path::new(&userprofile)
+                .join(".cursor")
+                .join("mcp.json");
+            write_json_mcp_entry(&cfg, &exe_str)?;
+            Ok(format!("Connected to Cursor ({})", cfg.display()))
+        }
+        "codex" => {
+            let dir = std::path::Path::new(&userprofile).join(".codex");
+            std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create .codex dir: {}", e))?;
+            let cfg = dir.join("config.toml");
+            let mut raw = if cfg.exists() {
+                std::fs::read_to_string(&cfg).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            if !raw.contains("[mcp_servers.veltrax-studios]") {
+                if !raw.is_empty() && !raw.ends_with('\n') {
+                    raw.push('\n');
+                }
+                raw.push_str(&format!(
+                    "\n[mcp_servers.veltrax-studios]\ncommand = '{}'\nargs = [\"--mcp\"]\n",
+                    exe_str
+                ));
+                std::fs::write(&cfg, raw).map_err(|e| format!("Failed to write config.toml: {}", e))?;
+            }
+            Ok(format!("Connected to ChatGPT / Codex ({})", cfg.display()))
+        }
+        other => Err(format!("Unknown AI client '{}'", other)),
+    }
+}
+
+#[tauri::command]
+pub fn disconnect_ai_client(client_id: String) -> Result<String, String> {
+    let appdata = appdata_dir();
+    let userprofile = userprofile_dir();
+
+    match client_id.as_str() {
+        "claude" | "lmstudio" | "cursor" => {
+            let cfg = match client_id.as_str() {
+                "claude" => std::path::Path::new(&appdata).join("Claude").join("claude_desktop_config.json"),
+                "lmstudio" => std::path::Path::new(&userprofile).join(".lmstudio").join("mcp.json"),
+                _ => std::path::Path::new(&userprofile).join(".cursor").join("mcp.json"),
+            };
+            if cfg.is_file() {
+                let raw = std::fs::read_to_string(&cfg).unwrap_or_default();
+                if let Ok(mut v) = serde_json::from_str::<Value>(&raw) {
+                    if let Some(obj) = v.get_mut("mcpServers").and_then(|s| s.as_object_mut()) {
+                        obj.remove("veltrax-studios");
+                        let pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+                        std::fs::write(&cfg, pretty).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+            Ok(format!("Disconnected {}", client_id))
+        }
+        "codex" => {
+            let cfg = std::path::Path::new(&userprofile).join(".codex").join("config.toml");
+            if cfg.is_file() {
+                let raw = std::fs::read_to_string(&cfg).unwrap_or_default();
+                let mut out = String::new();
+                let mut skipping = false;
+                for line in raw.lines() {
+                    let trimmed = line.trim();
+                    if trimmed == "[mcp_servers.veltrax-studios]" {
+                        skipping = true;
+                        continue;
+                    }
+                    if skipping && trimmed.starts_with('[') {
+                        skipping = false;
+                    }
+                    if !skipping {
+                        out.push_str(line);
+                        out.push('\n');
+                    }
+                }
+                std::fs::write(&cfg, out).map_err(|e| e.to_string())?;
+            }
+            Ok("Disconnected ChatGPT / Codex".to_string())
+        }
+        other => Err(format!("Unknown AI client '{}'", other)),
+    }
+}
+
+#[tauri::command]
+pub fn connect_all_detected() -> Result<Vec<String>, String> {
+    let clients = scan_desktop_ai_clients();
+    let mut results = Vec::new();
+    for c in clients {
+        if c.installed {
+            let msg = connect_ai_client(c.id)?;
+            results.push(msg);
+        }
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+pub fn get_mcp_snippets() -> Result<McpSnippets, String> {
+    let exe_path = std::env::current_exe()
+        .map_err(|e| format!("Failed to get executable path: {}", e))?;
+    let exe_str = exe_path.to_string_lossy().replace('\\', "/");
+    let exe_command = format!("\"{}\" --mcp", exe_str);
+    let json_snippet = serde_json::to_string_pretty(&json!({
+        "mcpServers": {
+            "veltrax-studios": {
+                "command": exe_str,
+                "args": ["--mcp"]
+            }
+        }
+    }))
+    .unwrap_or_default();
+
+    Ok(McpSnippets {
+        exe_path: exe_str,
+        exe_command,
+        json_snippet,
+    })
+}
+
+#[tauri::command]
+pub fn connect_claude_desktop() -> Result<String, String> {
+    connect_ai_client("claude".to_string())
+}
+
+#[derive(serde::Serialize)]
+pub struct McpRealStatus {
+    pub bridge_online: bool,
+    pub config_valid: bool,
+    pub claude_running: bool,
+    pub config_path: String,
+    pub exe_path: String,
+}
+
+#[tauri::command]
+pub fn check_mcp_real_status() -> McpRealStatus {
+    let bridge_online = ureq::get("http://127.0.0.1:3847/health").call().is_ok();
+
+    let appdata = std::env::var("APPDATA")
+        .unwrap_or_else(|_| r"C:\Users\Public\AppData\Roaming".to_string());
+    let config_path = std::path::Path::new(&appdata)
+        .join("Claude")
+        .join("claude_desktop_config.json");
+    let config_path_str = config_path.display().to_string();
+
+    let mut exe_path_str = String::new();
+    let mut config_valid = false;
+    if config_path.exists() {
+        if let Ok(raw) = std::fs::read_to_string(&config_path) {
+            if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+                if let Some(cmd) = v["mcpServers"]["veltrax-studios"]["command"].as_str() {
+                    exe_path_str = cmd.to_string();
+                    config_valid = std::path::Path::new(cmd).exists();
+                }
+            }
+        }
+    }
+
+    let claude_running = check_claude_process_running();
+
+    McpRealStatus {
+        bridge_online,
+        config_valid,
+        claude_running,
+        config_path: config_path_str,
+        exe_path: exe_path_str,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn check_claude_process_running() -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    std::process::Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq Claude.exe", "/NH"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("Claude.exe"))
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn check_claude_process_running() -> bool {
+    false
 }
 
 // ── Internal HTTP Bridge (127.0.0.1:3847) ───────────────────────────────────
@@ -93,6 +387,11 @@ fn handle_internal_request(
     app_handle: &tauri::AppHandle,
 ) -> Value {
     match url {
+        "/health" => json!({
+            "status": "ok",
+            "version": "1.0.0",
+            "engine": "veltrax-studios"
+        }),
         "/tool/inspect" => {
             let s = state.lock().unwrap();
             if !s.is_in_editor || !s.has_project || s.preview_path.is_empty() {
@@ -181,7 +480,11 @@ fn execute_mcp_layer_tool(
                 y: p["y"].as_i64().unwrap_or(40),
                 scale: p["scale"].as_f64().unwrap_or(1.0) as f32,
                 rotation: 0.0,
+                flip_h: false,
+                flip_v: false,
                 blend_mode: "normal".to_string(),
+                bounds_width: 0,
+                bounds_height: 0,
                 effects: LayerEffects::default(),
                 outline: LayerOutline::default(),
                 kind: LayerKind::Image {
@@ -240,7 +543,11 @@ fn execute_mcp_layer_tool(
                 y,
                 scale: 1.0,
                 rotation: 0.0,
+                flip_h: false,
+                flip_v: false,
                 blend_mode: "normal".to_string(),
+                bounds_width: 0,
+                bounds_height: 0,
                 effects: LayerEffects::default(),
                 outline: LayerOutline::default(),
                 kind: LayerKind::Text3D {
@@ -256,12 +563,64 @@ fn execute_mcp_layer_tool(
             });
             render_and_respond(s)
         }
+        "update_text_layer" => {
+            let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
+            let content = p["content"].as_str().ok_or("Missing 'content'")?.to_string();
+            s.push_undo();
+            let layer = s
+                .current
+                .layers
+                .iter_mut()
+                .find(|l| l.id == lid)
+                .ok_or_else(|| format!("Layer '{}' not found", lid))?;
+            let label: String = content.chars().take(18).collect();
+            layer.name = format!("Text: {}", label);
+            match &mut layer.kind {
+                LayerKind::Text3D {
+                    content: c,
+                    font_style,
+                    color,
+                    depth,
+                    stroke_color,
+                    stroke_width,
+                    size,
+                    ..
+                } => {
+                    *c = content;
+                    if let Some(fs) = p["font_style"].as_str() {
+                        *font_style = fs.to_string();
+                    }
+                    if let Some(sz) = p["size"].as_f64() {
+                        *size = sz as f32;
+                    }
+                    if let Some(ch) = p["color_hex"].as_str() {
+                        *color = parse_hex_color(ch);
+                    }
+                    if let Some(d) = p["depth_3d"].as_u64() {
+                        *depth = d as u32;
+                    }
+                    if let Some(sh) = p["stroke_hex"].as_str() {
+                        *stroke_color = parse_hex_color(sh);
+                    }
+                    if let Some(sw) = p["stroke_width"].as_u64() {
+                        *stroke_width = sw as u32;
+                    }
+                }
+                _ => return Err("Layer is not a Text layer".to_string()),
+            }
+            render_and_respond(s)
+        }
         "add_shape" => {
             let shape_type = p["shape_type"].as_str().unwrap_or("rectangle").to_string();
             let width = p["width"].as_u64().unwrap_or(300) as u32;
             let height = p["height"].as_u64().unwrap_or(160) as u32;
             let fill = parse_hex_color(p["fill_hex"].as_str().unwrap_or("#6366F1"));
             let radius = p["border_radius"].as_u64().unwrap_or(16) as u32;
+            let border_color = p["border_hex"]
+                .as_str()
+                .map(parse_hex_color)
+                .unwrap_or([0, 0, 0, 0]);
+            let border_width = p["border_width"].as_u64().unwrap_or(0) as u32;
             let x = p["x"].as_i64().unwrap_or(80);
             let y = p["y"].as_i64().unwrap_or(80);
             s.push_undo();
@@ -276,7 +635,11 @@ fn execute_mcp_layer_tool(
                 y,
                 scale: 1.0,
                 rotation: 0.0,
+                flip_h: false,
+                flip_v: false,
                 blend_mode: "normal".to_string(),
+                bounds_width: 0,
+                bounds_height: 0,
                 effects: LayerEffects::default(),
                 outline: LayerOutline::default(),
                 kind: LayerKind::Shape {
@@ -285,6 +648,108 @@ fn execute_mcp_layer_tool(
                     height: height.max(4),
                     fill_color: fill,
                     border_radius: radius,
+                    border_color,
+                    border_width,
+                },
+            });
+            render_and_respond(s)
+        }
+        "set_canvas_background" => {
+            s.push_undo();
+            if p["transparent"].as_bool() == Some(true) {
+                s.current.transparent_bg = true;
+                s.current.bg_gradient = None;
+            } else if let (Some(fh), Some(th)) = (p["from_hex"].as_str(), p["to_hex"].as_str()) {
+                s.current.transparent_bg = false;
+                s.current.bg_gradient = Some(BgGradient {
+                    from_color: parse_hex_color(fh),
+                    to_color: parse_hex_color(th),
+                    angle: p["angle"].as_f64().unwrap_or(135.0) as f32,
+                });
+            } else if let Some(hex) = p["color_hex"].as_str() {
+                s.current.transparent_bg = false;
+                s.current.bg_color = parse_hex_color(hex);
+                s.current.bg_gradient = None;
+            }
+            render_and_respond(s)
+        }
+        "add_gradient_layer" => {
+            let cw = s.current.canvas_width;
+            let ch = s.current.canvas_height;
+            let width = p["width"].as_u64().unwrap_or(cw as u64) as u32;
+            let height = p["height"].as_u64().unwrap_or(ch as u64) as u32;
+            let from_color = parse_hex_color(p["from_hex"].as_str().unwrap_or("#1a1d26"));
+            let to_color = parse_hex_color(p["to_hex"].as_str().unwrap_or("#6366f1"));
+            let angle = p["angle"].as_f64().unwrap_or(135.0) as f32;
+            let x = p["x"].as_i64().unwrap_or(0);
+            let y = p["y"].as_i64().unwrap_or(0);
+            s.push_undo();
+            let id = s.next_id();
+            s.current.layers.push(Layer {
+                id,
+                name: "Gradient".to_string(),
+                visible: true,
+                locked: false,
+                opacity: 1.0,
+                x,
+                y,
+                scale: 1.0,
+                rotation: 0.0,
+                flip_h: false,
+                flip_v: false,
+                blend_mode: "normal".to_string(),
+                bounds_width: 0,
+                bounds_height: 0,
+                effects: LayerEffects::default(),
+                outline: LayerOutline::default(),
+                kind: LayerKind::Gradient {
+                    width: width.max(4),
+                    height: height.max(4),
+                    from_color,
+                    to_color,
+                    angle,
+                },
+            });
+            render_and_respond(s)
+        }
+        "add_watermark_layer" => {
+            let text = p["text"].as_str().ok_or("Missing 'text'")?.to_string();
+            let opacity = (p["opacity"].as_f64().unwrap_or(0.4) as f32).clamp(0.05, 1.0);
+            let position = p["position"].as_str().unwrap_or("bottom-right").to_string();
+            let font_style = p["font_style"].as_str().unwrap_or("classic_serif").to_string();
+            let color = parse_hex_color(p["color_hex"].as_str().unwrap_or("#FFFFFF80"));
+            let size = (p["size"].as_f64().unwrap_or(28.0) as f32).max(8.0);
+            let cw = s.current.canvas_width;
+            let ch = s.current.canvas_height;
+            s.push_undo();
+            let id = s.next_id();
+            let label: String = text.chars().take(14).collect();
+            s.current.layers.push(Layer {
+                id,
+                name: format!("Watermark: {}", label),
+                visible: true,
+                locked: false,
+                opacity,
+                x: 0,
+                y: 0,
+                scale: 1.0,
+                rotation: 0.0,
+                flip_h: false,
+                flip_v: false,
+                blend_mode: "normal".to_string(),
+                bounds_width: 0,
+                bounds_height: 0,
+                effects: LayerEffects::default(),
+                outline: LayerOutline::default(),
+                kind: LayerKind::Watermark {
+                    text,
+                    font_style,
+                    color,
+                    size,
+                    position,
+                    opacity,
+                    canvas_width: cw,
+                    canvas_height: ch,
                 },
             });
             render_and_respond(s)
@@ -334,6 +799,12 @@ fn execute_mcp_layer_tool(
             }
             if let Some(bm) = p["blend_mode"].as_str() {
                 layer.blend_mode = bm.to_string();
+            }
+            if let Some(fh) = p["flip_h"].as_bool() {
+                layer.flip_h = fh;
+            }
+            if let Some(fv) = p["flip_v"].as_bool() {
+                layer.flip_v = fv;
             }
             render_and_respond(s)
         }
@@ -390,10 +861,75 @@ fn execute_mcp_layer_tool(
             s.current.layers.remove(idx);
             render_and_respond(s)
         }
+        "resize_canvas" => {
+            let width = p["width"].as_u64().ok_or("Missing 'width'")? as u32;
+            let height = p["height"].as_u64().ok_or("Missing 'height'")? as u32;
+            let scale_layers = p["scale_layers"].as_bool().unwrap_or(true);
+            if width == 0 || height == 0 {
+                return Err("Canvas width and height must be > 0".to_string());
+            }
+            s.push_undo();
+            let old_w = s.current.canvas_width.max(1) as f32;
+            let old_h = s.current.canvas_height.max(1) as f32;
+            let sx = width as f32 / old_w;
+            let sy = height as f32 / old_h;
+            let uniform = sx.min(sy);
+            s.current.canvas_width = width;
+            s.current.canvas_height = height;
+            if scale_layers {
+                for l in &mut s.current.layers {
+                    l.x = ((l.x as f32) * sx).round() as i64;
+                    l.y = ((l.y as f32) * sy).round() as i64;
+                    l.scale = (l.scale * uniform).clamp(0.05, 8.0);
+                }
+            }
+            render_and_respond(s)
+        }
+        "crop_canvas" => {
+            let x = p["x"].as_i64().unwrap_or(0);
+            let y = p["y"].as_i64().unwrap_or(0);
+            let width = p["width"].as_u64().ok_or("Missing 'width'")? as u32;
+            let height = p["height"].as_u64().ok_or("Missing 'height'")? as u32;
+            if width == 0 || height == 0 {
+                return Err("Crop width and height must be > 0".to_string());
+            }
+            s.push_undo();
+            s.current.canvas_width = width;
+            s.current.canvas_height = height;
+            for l in &mut s.current.layers {
+                l.x -= x;
+                l.y -= y;
+            }
+            render_and_respond(s)
+        }
+        "duplicate_layer" => {
+            let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
+            let idx = s
+                .current
+                .layers
+                .iter()
+                .position(|l| l.id == lid)
+                .ok_or_else(|| format!("Layer '{}' not found", lid))?;
+            s.push_undo();
+            let mut copy = s.current.layers[idx].clone();
+            copy.id = s.next_id();
+            copy.name = format!("{} Copy", copy.name);
+            copy.x += 20;
+            copy.y += 20;
+            s.current.layers.insert(idx + 1, copy);
+            render_and_respond(s)
+        }
         "undo" => {
             if let Some(prev) = s.undo_stack.pop() {
                 let curr = std::mem::replace(&mut s.current, prev);
                 s.redo_stack.push(curr);
+            }
+            render_and_respond(s)
+        }
+        "redo" => {
+            if let Some(next) = s.redo_stack.pop() {
+                let curr = std::mem::replace(&mut s.current, next);
+                s.undo_stack.push(curr);
             }
             render_and_respond(s)
         }
@@ -435,7 +971,7 @@ pub fn run_mcp_stdio() {
             "initialize" => Some(json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "veltrax-studios", "version": "0.1.0" }
+                "serverInfo": { "name": "veltrax-studios", "version": "1.0.0" }
             })),
             "notifications/initialized" => continue,
             "ping" => Some(json!({})),
@@ -516,8 +1052,26 @@ fn build_tools_description() -> Value {
                 }
             },
             {
+                "name": "update_text_layer",
+                "description": "Edit an existing Text layer's content, font style, size, colors, stroke, or 3D depth.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "layer_id": { "type": "string" },
+                        "content": { "type": "string" },
+                        "font_style": { "type": "string", "enum": ["modern_sans","classic_serif","tech_mono","bold_display","script"] },
+                        "size": { "type": "number" },
+                        "color_hex": { "type": "string" },
+                        "depth_3d": { "type": "integer", "minimum": 0, "maximum": 30 },
+                        "stroke_hex": { "type": "string" },
+                        "stroke_width": { "type": "integer", "minimum": 0, "maximum": 10 }
+                    },
+                    "required": ["layer_id", "content"]
+                }
+            },
+            {
                 "name": "add_shape",
-                "description": "Add a geometric shape layer (rectangle, circle, or badge).",
+                "description": "Add a geometric shape layer (rectangle, circle, or badge) with optional border.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -526,10 +1080,56 @@ fn build_tools_description() -> Value {
                         "height": { "type": "integer", "minimum": 4 },
                         "fill_hex": { "type": "string" },
                         "border_radius": { "type": "integer", "minimum": 0 },
+                        "border_hex": { "type": "string" },
+                        "border_width": { "type": "integer", "minimum": 0 },
                         "x": { "type": "integer" },
                         "y": { "type": "integer" }
                     },
                     "required": ["shape_type"]
+                }
+            },
+            {
+                "name": "set_canvas_background",
+                "description": "Set the canvas background to a solid color, linear gradient, or transparent PNG.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "color_hex": { "type": "string" },
+                        "from_hex": { "type": "string" },
+                        "to_hex": { "type": "string" },
+                        "angle": { "type": "number" },
+                        "transparent": { "type": "boolean" }
+                    }
+                }
+            },
+            {
+                "name": "add_gradient_layer",
+                "description": "Add a linear gradient layer to the canvas.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "width": { "type": "integer", "minimum": 4 },
+                        "height": { "type": "integer", "minimum": 4 },
+                        "from_hex": { "type": "string" },
+                        "to_hex": { "type": "string" },
+                        "angle": { "type": "number" },
+                        "x": { "type": "integer" },
+                        "y": { "type": "integer" }
+                    }
+                }
+            },
+            {
+                "name": "add_watermark_layer",
+                "description": "Add a semi-transparent text watermark stamp at a corner or center.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string" },
+                        "opacity": { "type": "number", "minimum": 0.05, "maximum": 1.0 },
+                        "position": { "type": "string", "enum": ["top-left","top-right","bottom-left","bottom-right","center"] },
+                        "size": { "type": "number" }
+                    },
+                    "required": ["text"]
                 }
             },
             {
@@ -558,7 +1158,9 @@ fn build_tools_description() -> Value {
                         "scale": { "type": "number" },
                         "rotation": { "type": "number" },
                         "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
-                        "blend_mode": { "type": "string", "enum": ["normal","multiply","screen","overlay"] }
+                        "blend_mode": { "type": "string", "enum": ["normal","multiply","screen","overlay"] },
+                        "flip_h": { "type": "boolean" },
+                        "flip_v": { "type": "boolean" }
                     },
                     "required": ["layer_id"]
                 }
@@ -601,8 +1203,49 @@ fn build_tools_description() -> Value {
                 }
             },
             {
+                "name": "resize_canvas",
+                "description": "Magic Resize: change canvas dimensions and optionally scale all layers proportionally.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "width": { "type": "integer", "minimum": 1 },
+                        "height": { "type": "integer", "minimum": 1 },
+                        "scale_layers": { "type": "boolean" }
+                    },
+                    "required": ["width", "height"]
+                }
+            },
+            {
+                "name": "crop_canvas",
+                "description": "Crop the canvas to a specific rectangle and shift layers accordingly.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "x": { "type": "integer" },
+                        "y": { "type": "integer" },
+                        "width": { "type": "integer", "minimum": 1 },
+                        "height": { "type": "integer", "minimum": 1 }
+                    },
+                    "required": ["width", "height"]
+                }
+            },
+            {
+                "name": "duplicate_layer",
+                "description": "Duplicate an existing layer by its ID.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "layer_id": { "type": "string" } },
+                    "required": ["layer_id"]
+                }
+            },
+            {
                 "name": "undo",
                 "description": "Undo the last layer action in Veltrax Studios.",
+                "inputSchema": { "type": "object", "properties": {}, "required": [] }
+            },
+            {
+                "name": "redo",
+                "description": "Redo the previously undone layer action in Veltrax Studios.",
                 "inputSchema": { "type": "object", "properties": {}, "required": [] }
             }
         ]

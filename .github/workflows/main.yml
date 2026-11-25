@@ -43,10 +43,10 @@ jobs:
       - name: Build Tauri app (Windows)
         run: npm run tauri build
 
-      - name: Upload Windows installer artifact
+      - name: Upload Windows Setup Installer (.exe)
         uses: actions/upload-artifact@v4
         with:
-          name: veltrax-studios-windows-bundle
-          path: src-tauri/target/release/bundle
+          name: Veltrax-Studios-1.0-Windows-Setup
+          path: src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
           retention-days: 30

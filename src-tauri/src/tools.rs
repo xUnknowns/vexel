@@ -18,7 +18,7 @@ fn next_preview_path() -> String {
 
 pub fn render_and_respond(state: &mut ProjectState) -> Result<ProjectResponse, String> {
     let dest = next_preview_path();
-    render_project_composite(&state.current, &dest)?;
+    render_project_composite(&mut state.current, &dest)?;
     state.preview_path = dest;
     Ok(state.to_response())
 }
@@ -115,6 +115,7 @@ pub fn create_project(
         } else {
             [255, 255, 255, 255]
         },
+        bg_gradient: None,
         layers: Vec::new(),
     };
     render_and_respond(&mut s)
@@ -146,6 +147,7 @@ pub fn open_base_image(
         canvas_height: h,
         transparent_bg: true,
         bg_color: [0, 0, 0, 0],
+        bg_gradient: None,
         layers: vec![Layer {
             id,
             name: file_stem,
@@ -156,7 +158,11 @@ pub fn open_base_image(
             y: 0,
             scale: 1.0,
             rotation: 0.0,
+            flip_h: false,
+            flip_v: false,
             blend_mode: "normal".to_string(),
+            bounds_width: w,
+            bounds_height: h,
             effects: LayerEffects::default(),
             outline: LayerOutline::default(),
             kind: LayerKind::Image {
@@ -200,7 +206,11 @@ pub fn add_image_overlay_layer(
         y: y.unwrap_or(40),
         scale: scale.unwrap_or(1.0).max(0.05),
         rotation: 0.0,
+        flip_h: false,
+        flip_v: false,
         blend_mode: "normal".to_string(),
+        bounds_width: 0,
+        bounds_height: 0,
         effects: LayerEffects::default(),
         outline: LayerOutline::default(),
         kind: LayerKind::Image {
@@ -273,7 +283,11 @@ pub fn add_text_layer(
         y,
         scale: 1.0,
         rotation: 0.0,
+        flip_h: false,
+        flip_v: false,
         blend_mode: "normal".to_string(),
+        bounds_width: 0,
+        bounds_height: 0,
         effects: LayerEffects::default(),
         outline: LayerOutline::default(),
         kind: LayerKind::Text3D {
@@ -291,6 +305,81 @@ pub fn add_text_layer(
 }
 
 #[tauri::command]
+pub fn update_text_layer(
+    state: tauri::State<'_, SharedProjectState>,
+    layer_id: String,
+    content: String,
+    font_style: String,
+    size: f32,
+    color_hex: String,
+    depth_3d: u32,
+    stroke_hex: String,
+    stroke_width: Option<u32>,
+) -> Result<ProjectResponse, String> {
+    if content.trim().is_empty() {
+        return Err("Text content cannot be empty.".to_string());
+    }
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.push_undo();
+    let layer = s
+        .current
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or_else(|| format!("Layer '{}' not found.", layer_id))?;
+
+    let label: String = content.chars().take(18).collect();
+    layer.name = format!("Text: {}", label);
+    match &mut layer.kind {
+        LayerKind::Text3D {
+            content: c,
+            font_style: fs,
+            color,
+            depth,
+            stroke_color,
+            stroke_width: sw,
+            size: sz,
+            ..
+        } => {
+            *c = content;
+            *fs = font_style;
+            *color = parse_hex_color(&color_hex);
+            *depth = depth_3d;
+            *stroke_color = parse_hex_color(&stroke_hex);
+            *sw = stroke_width.unwrap_or(*sw);
+            *sz = size.max(8.0);
+        }
+        _ => return Err("Selected layer is not a Text layer.".to_string()),
+    }
+    render_and_respond(&mut s)
+}
+
+#[tauri::command]
+pub fn crop_canvas(
+    state: tauri::State<'_, SharedProjectState>,
+    x: i64,
+    y: i64,
+    width: u32,
+    height: u32,
+) -> Result<ProjectResponse, String> {
+    if width == 0 || height == 0 {
+        return Err("Crop width and height must be greater than zero.".to_string());
+    }
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    if !s.has_project {
+        return Err("No active project to crop.".to_string());
+    }
+    s.push_undo();
+    s.current.canvas_width = width;
+    s.current.canvas_height = height;
+    for layer in &mut s.current.layers {
+        layer.x -= x;
+        layer.y -= y;
+    }
+    render_and_respond(&mut s)
+}
+
+#[tauri::command]
 pub fn add_shape_layer(
     state: tauri::State<'_, SharedProjectState>,
     shape_type: String,
@@ -298,6 +387,8 @@ pub fn add_shape_layer(
     height: u32,
     fill_hex: String,
     border_radius: u32,
+    border_hex: Option<String>,
+    border_width: Option<u32>,
     x: i64,
     y: i64,
 ) -> Result<ProjectResponse, String> {
@@ -319,7 +410,11 @@ pub fn add_shape_layer(
         y,
         scale: 1.0,
         rotation: 0.0,
+        flip_h: false,
+        flip_v: false,
         blend_mode: "normal".to_string(),
+        bounds_width: 0,
+        bounds_height: 0,
         effects: LayerEffects::default(),
         outline: LayerOutline::default(),
         kind: LayerKind::Shape {
@@ -328,8 +423,133 @@ pub fn add_shape_layer(
             height: height.max(4),
             fill_color: parse_hex_color(&fill_hex),
             border_radius,
+            border_color: border_hex.as_deref().map(parse_hex_color).unwrap_or([0, 0, 0, 0]),
+            border_width: border_width.unwrap_or(0),
         },
     });
+    render_and_respond(&mut s)
+}
+
+#[tauri::command]
+pub fn add_gradient_layer(
+    state: tauri::State<'_, SharedProjectState>,
+    width: u32,
+    height: u32,
+    from_hex: String,
+    to_hex: String,
+    angle: f32,
+    x: i64,
+    y: i64,
+) -> Result<ProjectResponse, String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.push_undo();
+    let id = s.next_id();
+    s.current.layers.push(Layer {
+        id,
+        name: "Gradient".to_string(),
+        visible: true,
+        locked: false,
+        opacity: 1.0,
+        x,
+        y,
+        scale: 1.0,
+        rotation: 0.0,
+        flip_h: false,
+        flip_v: false,
+        blend_mode: "normal".to_string(),
+        bounds_width: 0,
+        bounds_height: 0,
+        effects: LayerEffects::default(),
+        outline: LayerOutline::default(),
+        kind: LayerKind::Gradient {
+            width: width.max(4),
+            height: height.max(4),
+            from_color: parse_hex_color(&from_hex),
+            to_color: parse_hex_color(&to_hex),
+            angle,
+        },
+    });
+    render_and_respond(&mut s)
+}
+
+#[tauri::command]
+pub fn add_watermark_layer(
+    state: tauri::State<'_, SharedProjectState>,
+    text: String,
+    opacity: f32,
+    position: String,
+    font_style: Option<String>,
+    color_hex: Option<String>,
+    size: Option<f32>,
+) -> Result<ProjectResponse, String> {
+    if text.trim().is_empty() {
+        return Err("Watermark text cannot be empty.".to_string());
+    }
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.push_undo();
+    let id = s.next_id();
+    let cw = s.current.canvas_width;
+    let ch = s.current.canvas_height;
+    let font = font_style.unwrap_or_else(|| "classic_serif".to_string());
+    let color = parse_hex_color(color_hex.as_deref().unwrap_or("#FFFFFF80"));
+    let sz = size.unwrap_or(28.0).max(8.0);
+    s.current.layers.push(Layer {
+        id,
+        name: format!("Watermark: {}", &text.chars().take(14).collect::<String>()),
+        visible: true,
+        locked: false,
+        opacity: opacity.clamp(0.05, 1.0),
+        x: 0,
+        y: 0,
+        scale: 1.0,
+        rotation: 0.0,
+        flip_h: false,
+        flip_v: false,
+        blend_mode: "normal".to_string(),
+        bounds_width: 0,
+        bounds_height: 0,
+        effects: LayerEffects::default(),
+        outline: LayerOutline::default(),
+        kind: LayerKind::Watermark {
+            text,
+            font_style: font,
+            color,
+            size: sz,
+            position,
+            opacity: opacity.clamp(0.05, 1.0),
+            canvas_width: cw,
+            canvas_height: ch,
+        },
+    });
+    render_and_respond(&mut s)
+}
+
+#[tauri::command]
+pub fn set_canvas_background(
+    state: tauri::State<'_, SharedProjectState>,
+    color_hex: Option<String>,
+    from_hex: Option<String>,
+    to_hex: Option<String>,
+    angle: Option<f32>,
+    transparent: Option<bool>,
+) -> Result<ProjectResponse, String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.push_undo();
+    if transparent == Some(true) {
+        s.current.transparent_bg = true;
+        s.current.bg_gradient = None;
+    } else if let (Some(fh), Some(th)) = (from_hex.as_deref(), to_hex.as_deref()) {
+        s.current.transparent_bg = false;
+        s.current.bg_gradient = Some(BgGradient {
+            from_color: parse_hex_color(fh),
+            to_color: parse_hex_color(th),
+            angle: angle.unwrap_or(0.0),
+        });
+    } else if let Some(hex) = color_hex.as_deref() {
+        s.current.transparent_bg = false;
+        s.current.bg_color = parse_hex_color(hex);
+        s.current.bg_gradient = None;
+    }
     render_and_respond(&mut s)
 }
 
@@ -542,8 +762,10 @@ pub fn export_configured(
     format: String,
     quality: u8,
     scale: f32,
+    target_width: Option<u32>,
+    target_height: Option<u32>,
 ) -> Result<String, String> {
-    let snapshot = {
+    let mut snapshot = {
         let s = state.lock().map_err(|e| e.to_string())?;
         if !s.has_project {
             return Err("No active project to export.".to_string());
@@ -551,8 +773,10 @@ pub fn export_configured(
         s.current.clone()
     };
 
-    let img = render_project_composite(&snapshot, "")?;
-    let img = if (scale - 1.0).abs() > 0.01 {
+    let img = render_project_composite(&mut snapshot, "")?;
+    let img = if let (Some(tw), Some(th)) = (target_width, target_height) {
+        img.resize_exact(tw.max(1), th.max(1), FilterType::Lanczos3)
+    } else if (scale - 1.0).abs() > 0.01 {
         let nw = ((img.width() as f32 * scale) as u32).max(1);
         let nh = ((img.height() as f32 * scale) as u32).max(1);
         img.resize_exact(nw, nh, FilterType::Lanczos3)
@@ -612,4 +836,171 @@ pub fn load_project_file(
     s.is_in_editor = true;
     s.current = snapshot;
     render_and_respond(&mut s)
+}
+
+// ── Flip, Magic Resize & Persistent User Library (%APPDATA%) ────────────────
+
+#[tauri::command]
+pub fn flip_layer(
+    state: tauri::State<'_, SharedProjectState>,
+    layer_id: String,
+    horizontal: bool,
+) -> Result<ProjectResponse, String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.push_undo();
+    let layer = s
+        .current
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or_else(|| format!("Layer '{}' not found.", layer_id))?;
+    if layer.locked {
+        return Err("Layer is locked.".to_string());
+    }
+    if horizontal {
+        layer.flip_h = !layer.flip_h;
+    } else {
+        layer.flip_v = !layer.flip_v;
+    }
+    render_and_respond(&mut s)
+}
+
+#[tauri::command]
+pub fn resize_canvas(
+    state: tauri::State<'_, SharedProjectState>,
+    width: u32,
+    height: u32,
+    scale_layers: bool,
+) -> Result<ProjectResponse, String> {
+    if width == 0 || height == 0 {
+        return Err("Canvas width and height must be greater than zero.".to_string());
+    }
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    if !s.has_project {
+        return Err("No active project to resize.".to_string());
+    }
+    s.push_undo();
+    let old_w = s.current.canvas_width.max(1) as f32;
+    let old_h = s.current.canvas_height.max(1) as f32;
+    let sx = width as f32 / old_w;
+    let sy = height as f32 / old_h;
+    let uniform = sx.min(sy);
+
+    s.current.canvas_width = width;
+    s.current.canvas_height = height;
+
+    if scale_layers {
+        for layer in &mut s.current.layers {
+            layer.x = ((layer.x as f32) * sx).round() as i64;
+            layer.y = ((layer.y as f32) * sy).round() as i64;
+            layer.scale = (layer.scale * uniform).clamp(0.05, 8.0);
+        }
+    }
+    render_and_respond(&mut s)
+}
+
+fn user_data_root() -> std::path::PathBuf {
+    let appdata = std::env::var("APPDATA")
+        .unwrap_or_else(|_| r"C:\Users\Public\AppData\Roaming".to_string());
+    std::path::Path::new(&appdata).join("Veltrax Studios")
+}
+
+#[tauri::command]
+pub fn get_default_projects_dir() -> Result<String, String> {
+    let dir = user_data_root().join("projects");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct LibraryItem {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[tauri::command]
+pub fn get_user_library() -> Result<Vec<LibraryItem>, String> {
+    let lib_dir = user_data_root().join("library");
+    std::fs::create_dir_all(&lib_dir).map_err(|e| e.to_string())?;
+    let mut items = Vec::new();
+    let entries = std::fs::read_dir(&lib_dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let ext = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp") {
+            continue;
+        }
+        let id = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        let display_name = id
+            .split_once('_')
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_else(|| id.clone());
+        let (w, h) = image::image_dimensions(&p).unwrap_or((0, 0));
+        items.push(LibraryItem {
+            id,
+            name: display_name,
+            path: p.to_string_lossy().to_string(),
+            width: w,
+            height: h,
+        });
+    }
+    items.sort_by(|a, b| b.id.cmp(&a.id));
+    Ok(items)
+}
+
+#[tauri::command]
+pub fn save_to_user_library(source_path: String) -> Result<LibraryItem, String> {
+    let src = Path::new(&source_path);
+    if !src.is_file() {
+        return Err(format!("Source file '{}' not found.", source_path));
+    }
+    let lib_dir = user_data_root().join("library");
+    std::fs::create_dir_all(&lib_dir).map_err(|e| e.to_string())?;
+
+    let orig_name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("element.png");
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let id = format!("{}_{}", ms, orig_name);
+    let dest = lib_dir.join(&id);
+    std::fs::copy(src, &dest).map_err(|e| format!("Failed to save element to library: {}", e))?;
+
+    let (w, h) = image::image_dimensions(&dest).unwrap_or((0, 0));
+    Ok(LibraryItem {
+        id,
+        name: orig_name.to_string(),
+        path: dest.to_string_lossy().to_string(),
+        width: w,
+        height: h,
+    })
+}
+
+#[tauri::command]
+pub fn delete_from_user_library(id: String) -> Result<(), String> {
+    if id.contains("..") || id.contains('/') || id.contains('\\') {
+        return Err("Invalid library item ID.".to_string());
+    }
+    let target = user_data_root().join("library").join(&id);
+    if target.is_file() {
+        std::fs::remove_file(&target).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }

@@ -15,7 +15,7 @@
 
   let format = $state('png');
   let quality = $state(90);
-  let scale = $state(1.0);
+  let sizeMode = $state('original'); // 'original' | '0.5x' | '2x' | 'yt_thumb' | 'yt_banner' | 'tiktok' | 'ig_post' | 'logo' | 'x_header'
   let fileName = $state('export');
   let saving = $state(false);
   let feedback = $state('');
@@ -27,18 +27,32 @@
     }
   });
 
-  let finalW = $derived(Math.max(1, Math.round(imgWidth * scale)));
-  let finalH = $derived(Math.max(1, Math.round(imgHeight * scale)));
+  const sizePresets = [
+    { id: 'original', label: '1× Original', w: null, h: null, scale: 1.0 },
+    { id: '0.5x', label: '0.5× Half', w: null, h: null, scale: 0.5 },
+    { id: '2x', label: '2× Upscale', w: null, h: null, scale: 2.0 },
+    { id: 'yt_thumb', label: 'YouTube Thumb', w: 1280, h: 720, scale: 1.0 },
+    { id: 'yt_banner', label: 'YouTube Banner', w: 2560, h: 1440, scale: 1.0 },
+    { id: 'tiktok', label: 'TikTok / Reels', w: 1080, h: 1920, scale: 1.0 },
+    { id: 'ig_post', label: 'Instagram 1:1', w: 1080, h: 1080, scale: 1.0 },
+    { id: 'logo', label: 'Logo PNG 1024', w: 1024, h: 1024, scale: 1.0 },
+    { id: 'x_header', label: 'X / Twitter Header', w: 1500, h: 500, scale: 1.0 },
+    { id: 'twitch', label: 'Twitch Panel', w: 320, h: 160, scale: 1.0 },
+    { id: 'linkedin', label: 'LinkedIn Banner', w: 1584, h: 396, scale: 1.0 },
+    { id: 'fb_cover', label: 'Facebook Cover', w: 820, h: 312, scale: 1.0 },
+    { id: 'discord', label: 'Discord Banner', w: 960, h: 540, scale: 1.0 },
+    { id: 'favicon32', label: 'Favicon 32px', w: 32, h: 32, scale: 1.0 },
+    { id: 'favicon64', label: 'Favicon 64px', w: 64, h: 64, scale: 1.0 },
+  ];
+
+  let activePreset = $derived(sizePresets.find((p) => p.id === sizeMode) ?? sizePresets[0]);
+  let finalW = $derived(activePreset.w ?? Math.max(1, Math.round(imgWidth * activePreset.scale)));
+  let finalH = $derived(activePreset.h ?? Math.max(1, Math.round(imgHeight * activePreset.scale)));
 
   const formats = [
     { id: 'png', label: 'PNG', badge: 'Transparent' },
     { id: 'jpeg', label: 'JPEG', badge: 'Compact' },
     { id: 'webp', label: 'WebP', badge: 'Modern Web' },
-  ];
-  const scales = [
-    { v: 0.5, label: '0.5× Downscale' },
-    { v: 1.0, label: '1× Original' },
-    { v: 2.0, label: '2× Upscale' },
   ];
 
   async function handleSave() {
@@ -66,7 +80,9 @@
         destPath: dest,
         format,
         quality: Number(quality),
-        scale: Number(scale),
+        scale: Number(activePreset.scale),
+        targetWidth: activePreset.w,
+        targetHeight: activePreset.h,
       });
 
       feedback = `Saved as ${dest.split(/[/\\]/).pop()}`;
@@ -129,13 +145,13 @@
         {/if}
 
         <div class="field-group">
-          <label class="field-label">Scale / Resolution</label>
+          <label class="field-label">Platform &amp; Resolution Presets</label>
           <div class="scale-row">
-            {#each scales as s}
+            {#each sizePresets as s}
               <button
                 class="scale-btn"
-                class:selected={scale === s.v}
-                onclick={() => (scale = s.v)}
+                class:selected={sizeMode === s.id}
+                onclick={() => (sizeMode = s.id)}
               >
                 {s.label}
               </button>
@@ -165,22 +181,22 @@
 
 <style>
   .backdrop { position:fixed; inset:0; background:rgba(0,0,0,0.65); backdrop-filter:blur(6px); display:grid; place-items:center; z-index:2000; }
-  .modal { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--r-xl); width:min(480px,94vw); display:flex; flex-direction:column; box-shadow:0 32px 80px rgba(0,0,0,0.5); }
+  .modal { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--r-xl); width:min(540px,94vw); display:flex; flex-direction:column; box-shadow:0 32px 80px rgba(0,0,0,0.5); }
   .modal-header { display:flex; align-items:center; justify-content:space-between; padding:16px 20px; border-bottom:1px solid var(--border); }
   .modal-title { display:flex; align-items:center; gap:8px; font-size:15px; font-weight:700; }
   .close-btn { display:grid; place-items:center; width:28px; height:28px; border-radius:var(--r-sm); background:var(--bg-elevated); color:var(--text-secondary); border:1px solid var(--border); }
-  .modal-body { padding:20px; display:flex; flex-direction:column; gap:18px; }
+  .modal-body { padding:20px; display:flex; flex-direction:column; gap:16px; max-height:75vh; overflow-y:auto; }
   .field-group { display:flex; flex-direction:column; gap:8px; }
   .field-label { display:flex; justify-content:space-between; font-size:12px; font-weight:600; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.05em; }
   .val { color:var(--text-primary); font-variant-numeric:tabular-nums; }
   .format-row { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
-  .format-btn { display:flex; flex-direction:column; align-items:center; gap:4px; padding:12px 8px; border-radius:var(--r-md); background:var(--bg-elevated); border:1.5px solid var(--border); color:var(--text-secondary); }
+  .format-btn { display:flex; flex-direction:column; align-items:center; gap:4px; padding:11px 8px; border-radius:var(--r-md); background:var(--bg-elevated); border:1.5px solid var(--border); color:var(--text-secondary); }
   .format-btn.selected { background:var(--accent-subtle); border-color:var(--accent); color:var(--text-primary); }
   .fmt-label { font-size:15px; font-weight:700; }
   .fmt-badge { font-size:10px; opacity:0.75; }
   .warn-note { font-size:11px; color:#f59e0b; }
-  .scale-row { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
-  .scale-btn { padding:9px; border-radius:var(--r-sm); background:var(--bg-elevated); border:1.5px solid var(--border); color:var(--text-secondary); font-size:12px; }
+  .scale-row { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+  .scale-btn { padding:8px 6px; border-radius:var(--r-sm); background:var(--bg-elevated); border:1.5px solid var(--border); color:var(--text-secondary); font-size:11px; }
   .scale-btn.selected { background:var(--accent-subtle); border-color:var(--accent); color:var(--text-primary); font-weight:600; }
   .dim-preview { font-size:12px; color:var(--text-secondary); text-align:center; }
   .dim-preview strong { color:var(--text-primary); }

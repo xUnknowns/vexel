@@ -1,6 +1,6 @@
 [package]
 name = "veltrax-studios"
-version = "0.1.0"
+version = "1.0.0"
 description = "Veltrax Studios — Fast desktop image editor by Crafters Apex"
 authors = ["Crafters Apex"]
 edition = "2021"

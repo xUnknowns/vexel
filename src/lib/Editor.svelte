@@ -3,12 +3,15 @@
   import { open, save } from '@tauri-apps/plugin-dialog';
   import {
     ArrowLeft, Download, Undo2, Redo2, Save,
-    Layers, Shapes, Type, SlidersHorizontal, Sparkles, Bot,
+    Layers, Shapes, Type, SlidersHorizontal, Sparkles, Bot, Crop, Palette,
     ChevronLeft, ChevronRight, Maximize2, Eye, EyeOff,
     Lock, Unlock, Copy, Trash2, ArrowUp, ArrowDown,
-    ImagePlus, Eraser, Plug, AlignCenterHorizontal, AlignCenterVertical
+    ImagePlus, Eraser, AlignCenterHorizontal, AlignCenterVertical,
+    Stamp, Search, FlipHorizontal, FlipVertical, Upload, X
   } from 'lucide-svelte';
   import ExportModal from './ExportModal.svelte';
+  import CanvasGizmo from './CanvasGizmo.svelte';
+  import McpPanel from './McpPanel.svelte';
 
   let {
     project = null,
@@ -18,7 +21,6 @@
     onGoHome,
   } = $props();
 
-  // ── UI State ─────────────────────────────────────────────────────────────
   let activeTool = $state('layers');
   let drawerOpen = $state(true);
   let selectedLayerId = $state(null);
@@ -28,6 +30,12 @@
   let showExportModal = $state(false);
   let zoom = $state(1.0);
   let canvasArea;
+  let textInputEl;
+
+  // ── Crop State ───────────────────────────────────────────────────────────
+  let cropAspect = $state(null);
+  let cropRect = $state({ x: 0, y: 0, width: 640, height: 360 });
+  let cropMode = $derived(activeTool === 'crop' && drawerOpen);
 
   // ── Derived Project Fields ───────────────────────────────────────────────
   let hasProject = $derived(Boolean(project && project.preview_path));
@@ -39,9 +47,9 @@
     project?.preview_path ? `${convertFileSrc(project.preview_path)}?v=${cacheBuster}` : ''
   );
   let selectedLayer = $derived(layers.find((l) => l.id === selectedLayerId) ?? null);
+  let isEditingText = $derived(selectedLayer?.kind?.type === 'Text3D');
   let zoomPct = $derived(Math.round(zoom * 100));
 
-  // Auto-select top layer when layers change and current selection disappears
   $effect(() => {
     if (layers.length > 0 && (!selectedLayerId || !layers.some((l) => l.id === selectedLayerId))) {
       selectedLayerId = layers[layers.length - 1].id;
@@ -50,7 +58,18 @@
     }
   });
 
-  // ── Tool Inputs Synced with Selected Layer ───────────────────────────────
+  $effect(() => {
+    if (cropMode && hasProject) {
+      cropRect = {
+        x: Math.round(canvasW * 0.1),
+        y: Math.round(canvasH * 0.1),
+        width: Math.max(40, Math.round(canvasW * 0.8)),
+        height: Math.max(40, Math.round(canvasH * 0.8)),
+      };
+    }
+  });
+
+  // ── Selected Layer Transform / Effects / Outline ─────────────────────────
   let layerX = $state(0);
   let layerY = $state(0);
   let layerScale = $state(1.0);
@@ -68,6 +87,21 @@
   let outColor = $state('#FFFFFF');
   let outThickness = $state(6);
 
+  // ── Text Controls (Live-synced when Text3D layer selected) ───────────────
+  let textContent = $state('VELTRAX');
+  let fontStyle = $state('bold_display');
+  let fontSize = $state(96);
+  let textColor = $state('#FFFFFF');
+  let textDepth = $state(0);
+  let strokeColor = $state('#000000');
+  let strokeWidth = $state(0);
+  let textX = $state(80);
+  let textY = $state(80);
+
+  function rgbaToHex([r, g, b]) {
+    return `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('').toUpperCase()}`;
+  }
+
   $effect(() => {
     if (selectedLayer) {
       layerX = selectedLayer.x;
@@ -83,59 +117,200 @@
       fxFilter = selectedLayer.effects.filter;
       outEnabled = selectedLayer.outline.enabled;
       outThickness = selectedLayer.outline.thickness;
-      const [r, g, b] = selectedLayer.outline.color;
-      outColor = `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+      outColor = rgbaToHex(selectedLayer.outline.color);
+
+      if (selectedLayer.kind?.type === 'Text3D') {
+        textContent = selectedLayer.kind.content;
+        fontStyle = selectedLayer.kind.font_style;
+        fontSize = selectedLayer.kind.size;
+        textColor = rgbaToHex(selectedLayer.kind.color);
+        textDepth = selectedLayer.kind.depth;
+        strokeColor = rgbaToHex(selectedLayer.kind.stroke_color);
+        strokeWidth = selectedLayer.kind.stroke_width;
+      }
     }
   });
 
-  // ── Text & Shape & BG Removal Inputs ─────────────────────────────────────
-  let textContent = $state('VELTRAX');
-  let fontStyle = $state('bold_display');
-  let fontSize = $state(96);
-  let textColor = $state('#FFFFFF');
-  let textDepth = $state(8);
-  let strokeColor = $state('#000000');
-  let strokeWidth = $state(3);
-  let textX = $state(80);
-  let textY = $state(80);
-
   let shapeColor = $state('#6366F1');
+  let shapeWithBorder = $state(false);
+  let shapeBorderColor = $state('#FFFFFF');
+  let shapeBorderWidth = $state(4);
   let bgTargetHex = $state('#FFFFFF');
   let bgTolerance = $state(35);
-  let connectResult = $state('');
 
-  // ── Drag-to-move layer on canvas ─────────────────────────────────────────
-  let isDragging = $state(false);
-  let dragStartMouse = { x: 0, y: 0 };
-  let dragStartLayer = { x: 0, y: 0 };
+  // ── Canvas Background ────────────────────────────────────────────────────
+  let bgMode = $state('solid'); // 'solid' | 'gradient' | 'transparent'
+  let bgSolidHex = $state('#1a1d26');
+  let bgGradFromHex = $state('#1a1d26');
+  let bgGradToHex = $state('#6366f1');
+  let bgGradAngle = $state(135);
 
-  function onCanvasMouseDown(e) {
-    if (!selectedLayer || selectedLayer.locked || isProcessing) return;
-    isDragging = true;
-    dragStartMouse = { x: e.clientX, y: e.clientY };
-    dragStartLayer = { x: selectedLayer.x, y: selectedLayer.y };
-  }
-  function onCanvasMouseMove(e) {
-    if (!isDragging) return;
-    layerX = Math.round(dragStartLayer.x + (e.clientX - dragStartMouse.x) / zoom);
-    layerY = Math.round(dragStartLayer.y + (e.clientY - dragStartMouse.y) / zoom);
-  }
-  function onCanvasMouseUp() {
-    if (!isDragging) return;
-    isDragging = false;
-    if (selectedLayer && (layerX !== selectedLayer.x || layerY !== selectedLayer.y)) {
-      commitTransform();
+  // ── Watermark ────────────────────────────────────────────────────────────
+  let wmText = $state('© Veltrax Studios');
+  let wmOpacity = $state(0.4);
+  let wmPosition = $state('bottom-right');
+  let wmSize = $state(28);
+
+  const gradientPresets = [
+    { label: 'Dark Drama',  from: '#0f0c29', to: '#302b63' },
+    { label: 'Fire',        from: '#f12711', to: '#f5af19' },
+    { label: 'Ocean',       from: '#1a1a2e', to: '#16213e' },
+    { label: 'Neon',        from: '#00f260', to: '#0575e6' },
+    { label: 'Purple Haze', from: '#41295a', to: '#2F0743' },
+    { label: 'Sunset',      from: '#f093fb', to: '#f5576c' },
+    { label: 'Dark Blue',   from: '#0d0f12', to: '#1e3a5f' },
+    { label: 'Midnight',    from: '#000000', to: '#434343' },
+  ];
+
+  async function applyCanvasBg() {
+    if (bgMode === 'transparent') {
+      await runCmd('set_canvas_background', { transparent: true }, 'Set Transparent BG');
+    } else if (bgMode === 'gradient') {
+      await runCmd('set_canvas_background', {
+        fromHex: bgGradFromHex, toHex: bgGradToHex, angle: Number(bgGradAngle)
+      }, 'Set Gradient BG');
+    } else {
+      await runCmd('set_canvas_background', { colorHex: bgSolidHex }, 'Set Solid BG');
     }
+  }
+
+  async function addGradientLayer() {
+    const resp = await runCmd(
+      'add_gradient_layer',
+      {
+        width: canvasW,
+        height: canvasH,
+        fromHex: bgGradFromHex,
+        toHex: bgGradToHex,
+        angle: Number(bgGradAngle),
+        x: 0, y: 0,
+      },
+      'Add Gradient Layer'
+    );
+    if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
+  }
+
+  async function addWatermark() {
+    if (!wmText.trim()) return;
+    const resp = await runCmd(
+      'add_watermark_layer',
+      {
+        text: wmText,
+        opacity: Number(wmOpacity),
+        position: wmPosition,
+        size: Number(wmSize),
+      },
+      'Add Watermark'
+    );
+    if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
+  }
+
+  // ── Persistent User Elements Library (%APPDATA%) ─────────────────────────
+  let userLibrary = $state([]);
+  let librarySearch = $state('');
+  let textSearch = $state('');
+
+  let filteredLibrary = $derived(
+    librarySearch.trim()
+      ? userLibrary.filter((item) => item.name.toLowerCase().includes(librarySearch.trim().toLowerCase()))
+      : userLibrary
+  );
+
+  let filteredTextPresets = $derived(
+    textSearch.trim()
+      ? textPresets.filter((tp) => tp.label.toLowerCase().includes(textSearch.trim().toLowerCase()))
+      : textPresets
+  );
+
+  async function loadUserLibrary() {
+    try {
+      userLibrary = await invoke('get_user_library');
+    } catch (e) {
+      console.error('loadUserLibrary:', e);
+    }
+  }
+
+  $effect(() => {
+    loadUserLibrary();
+  });
+
+  async function uploadAndSaveElement() {
+    const sel = await open({
+      multiple: false,
+      title: 'Upload & Save Element to Library',
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] }],
+    });
+    if (typeof sel === 'string' && sel) {
+      try {
+        const saved = await invoke('save_to_user_library', { sourcePath: sel });
+        await loadUserLibrary();
+        if (hasProject) {
+          const resp = await runCmd('add_image_overlay_layer', { imagePath: saved.path, x: 40, y: 40, scale: 1.0 }, 'Add Element');
+          if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
+        }
+      } catch (e) {
+        errorMsg = String(e);
+      }
+    }
+  }
+
+  async function addLibraryItemToCanvas(item) {
+    if (!hasProject || isProcessing) return;
+    const resp = await runCmd('add_image_overlay_layer', { imagePath: item.path, x: 40, y: 40, scale: 1.0 }, `Add ${item.name}`);
+    if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
+  }
+
+  async function deleteLibraryItem(e, id) {
+    e.stopPropagation();
+    try {
+      await invoke('delete_from_user_library', { id });
+      await loadUserLibrary();
+    } catch (err) {
+      errorMsg = String(err);
+    }
+  }
+
+  async function quickAddTextTier(content, size, font, depth = 0, strokeW = 0) {
+    if (!hasProject || isProcessing) return;
+    const resp = await runCmd(
+      'add_text_layer',
+      {
+        content,
+        fontStyle: font,
+        size,
+        colorHex: textColor,
+        depth3d: depth,
+        strokeHex: strokeColor,
+        strokeWidth: strokeW,
+        x: Math.max(20, Math.round(canvasW * 0.2)),
+        y: Math.max(20, Math.round(canvasH * 0.38)),
+      },
+      'Add Text'
+    );
+    if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
   }
 
   // ── Rail & Presets ───────────────────────────────────────────────────────
   const tools = [
-    { id: 'layers', label: 'Layers', Icon: Layers },
-    { id: 'elements', label: 'Elements', Icon: Shapes },
-    { id: 'text', label: 'Text & 3D', Icon: Type },
-    { id: 'adjust', label: 'Adjust', Icon: SlidersHorizontal },
-    { id: 'outline', label: 'Outline', Icon: Sparkles },
-    { id: 'mcp', label: 'MCP AI', Icon: Bot },
+    { id: 'layers',     label: 'Layers',    Icon: Layers },
+    { id: 'elements',   label: 'Elements',  Icon: Shapes },
+    { id: 'text',       label: 'Text',      Icon: Type },
+    { id: 'background', label: 'BG',        Icon: Palette },
+    { id: 'adjust',     label: 'Adjust',    Icon: SlidersHorizontal },
+    { id: 'outline',    label: 'Outline',   Icon: Sparkles },
+    { id: 'crop',       label: 'Crop',      Icon: Crop },
+    { id: 'mcp',        label: 'MCP AI',    Icon: Bot },
+  ];
+
+  const textPresets = [
+    { label: 'Flat Text',      depth: 0,  strokeW: 0,  color: '#FFFFFF', font: 'bold_display' },
+    { label: 'Outlined',       depth: 0,  strokeW: 4,  color: '#FFFFFF', font: 'bold_display' },
+    { label: 'Soft Shadow',    depth: 3,  strokeW: 0,  color: '#FFFFFF', font: 'bold_display' },
+    { label: '3D Gaming',      depth: 10, strokeW: 3,  color: '#FFD700', font: 'bold_display' },
+    { label: 'Neon Glow',      depth: 0,  strokeW: 2,  color: '#00f5ff', font: 'bold_display' },
+    { label: 'Retro Stroke',   depth: 2,  strokeW: 5,  color: '#FF6B35', font: 'bold_display' },
+    { label: 'Tech Mono',      depth: 0,  strokeW: 1,  color: '#7CFC00', font: 'tech_mono' },
+    { label: 'Classic Serif',  depth: 0,  strokeW: 0,  color: '#F5F5DC', font: 'classic_serif' },
   ];
 
   const fontStyles = [
@@ -157,12 +332,29 @@
 
   const quickColors = ['#FFFFFF', '#000000', '#EF4444', '#F97316', '#EAB308', '#10B981', '#6366F1'];
 
-  // ── Helpers ──────────────────────────────────────────────────────────────
   function selectTool(id) {
     if (activeTool === id) drawerOpen = !drawerOpen;
     else {
       activeTool = id;
       drawerOpen = true;
+    }
+  }
+
+  function setCropAspectRatio(ratio) {
+    cropAspect = ratio;
+    if (ratio && hasProject) {
+      let nw = Math.round(canvasW * 0.8);
+      let nh = Math.round(nw / ratio);
+      if (nh > canvasH) {
+        nh = Math.round(canvasH * 0.8);
+        nw = Math.round(nh * ratio);
+      }
+      cropRect = {
+        x: Math.round((canvasW - nw) / 2),
+        y: Math.round((canvasH - nh) / 2),
+        width: nw,
+        height: nh,
+      };
     }
   }
 
@@ -199,7 +391,6 @@
     }
   }
 
-  // ── Actions ──────────────────────────────────────────────────────────────
   function handleKeydown(e) {
     if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
       e.preventDefault();
@@ -214,9 +405,16 @@
 
   async function saveVeltraxProject() {
     if (!hasProject) return;
+    let defaultDir = '';
+    try {
+      defaultDir = await invoke('get_default_projects_dir');
+    } catch {
+      defaultDir = '';
+    }
+    const fileName = `${project.project_name || 'project'}.veltrax`;
     const dest = await save({
       title: 'Save Veltrax Project',
-      defaultPath: `${project.project_name || 'project'}.veltrax`,
+      defaultPath: defaultDir ? `${defaultDir}\\${fileName}` : fileName,
       filters: [{ name: 'Veltrax Project', extensions: ['veltrax'] }],
     });
     if (dest) {
@@ -246,6 +444,8 @@
         height: shapeType === 'badge' ? 90 : 240,
         fillHex: shapeColor,
         borderRadius: shapeType === 'rectangle' ? 20 : 0,
+        borderHex: shapeWithBorder ? shapeBorderColor : null,
+        borderWidth: shapeWithBorder ? shapeBorderWidth : 0,
         x: Math.round(canvasW / 2 - 120),
         y: Math.round(canvasH / 2 - 120),
       },
@@ -254,7 +454,7 @@
     if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
   }
 
-  async function addTextLayer() {
+  async function addNewTextLayer() {
     const resp = await runCmd(
       'add_text_layer',
       {
@@ -268,9 +468,52 @@
         x: Number(textX),
         y: Number(textY),
       },
-      'Add 3D Text'
+      'Add Text'
     );
     if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
+  }
+
+  async function updateSelectedTextLayer() {
+    if (!selectedLayer || !isEditingText) return;
+    await runCmd(
+      'update_text_layer',
+      {
+        layerId: selectedLayer.id,
+        content: textContent,
+        fontStyle,
+        size: Number(fontSize),
+        colorHex: textColor,
+        depth3d: Number(textDepth),
+        strokeHex: strokeColor,
+        strokeWidth: Number(strokeWidth),
+      },
+      'Update Text'
+    );
+  }
+
+  function handleDoubleClickText(layer) {
+    selectedLayerId = layer.id;
+    activeTool = 'text';
+    drawerOpen = true;
+    setTimeout(() => textInputEl?.focus(), 60);
+  }
+
+  function commitGizmoTransform(layerId, nx, ny, nscale, nrot) {
+    const l = layers.find((item) => item.id === layerId);
+    if (!l) return;
+    runCmd(
+      'update_layer_transform',
+      {
+        layerId,
+        x: nx,
+        y: ny,
+        scale: nscale,
+        rotation: nrot,
+        opacity: l.opacity,
+        blendMode: l.blend_mode,
+      },
+      'Transform Layer'
+    );
   }
 
   function commitTransform() {
@@ -331,19 +574,24 @@
     );
   }
 
-  async function connectClaude() {
-    try {
-      connectResult = await invoke('connect_claude_desktop');
-    } catch (e) {
-      connectResult = `Error: ${e}`;
-    }
+  async function applyCrop() {
+    await runCmd(
+      'crop_canvas',
+      {
+        x: Number(cropRect.x),
+        y: Number(cropRect.y),
+        width: Math.max(1, Number(cropRect.width)),
+        height: Math.max(1, Number(cropRect.height)),
+      },
+      'Crop Canvas'
+    );
+    activeTool = 'layers';
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} onmouseup={onCanvasMouseUp} onmousemove={onCanvasMouseMove} />
+<svelte:window onkeydown={handleKeydown} />
 
 <div class="editor-shell">
-  <!-- ── Top Bar ────────────────────────────────────────────────────────── -->
   <header class="top-bar">
     <div class="tb-left">
       <button class="btn-ghost icon-btn" onclick={onGoHome} title="Back to Home">
@@ -381,7 +629,6 @@
     </div>
   </header>
 
-  <!-- ── Body ───────────────────────────────────────────────────────────── -->
   <div class="editor-body">
     <aside class="tool-rail">
       {#each tools as t}
@@ -406,7 +653,7 @@
           {#if activeTool === 'layers'}
             <div class="panel">
               {#if layers.length === 0}
-                <p class="panel-note">No layers yet. Add an image overlay, 3D text, or shape from the left rail.</p>
+                <p class="panel-note">No layers yet. Add an image overlay, text, or shape from the left rail.</p>
               {:else}
                 <div class="layer-list">
                   {#each [...layers].reverse() as l, revIdx}
@@ -458,18 +705,60 @@
                   <label class="field"><span>Scale</span><input type="number" min="0.05" max="8" step="0.05" bind:value={layerScale} /></label>
                   <label class="field"><span>Rotate °</span><input type="number" step="1" bind:value={layerRot} /></label>
                 </div>
+                <div class="btn-grid-2">
+                  <button class="btn-ghost" onclick={() => runCmd('flip_layer', { layerId: selectedLayer.id, horizontal: true }, 'Flip H')} disabled={isProcessing || selectedLayer.locked}>
+                    <FlipHorizontal size={12} strokeWidth={1.75} /> Flip H
+                  </button>
+                  <button class="btn-ghost" onclick={() => runCmd('flip_layer', { layerId: selectedLayer.id, horizontal: false }, 'Flip V')} disabled={isProcessing || selectedLayer.locked}>
+                    <FlipVertical size={12} strokeWidth={1.75} /> Flip V
+                  </button>
+                </div>
                 <button class="btn-primary fw" onclick={commitTransform} disabled={isProcessing || selectedLayer.locked}>
                   Apply Transform
                 </button>
               {/if}
             </div>
 
-          <!-- ══ ELEMENTS & IMAGES ══ -->
+          <!-- ══ ELEMENTS & SAVED LIBRARY ══ -->
           {:else if activeTool === 'elements'}
             <div class="panel">
-              <button class="btn-primary fw" onclick={addOverlayImage} disabled={!hasProject || isProcessing}>
-                <ImagePlus size={14} strokeWidth={2} /> Add Image / Icon Overlay
+              <div class="search-box">
+                <Search size={13} strokeWidth={1.75} />
+                <input type="text" bind:value={librarySearch} placeholder="Search saved elements..." />
+              </div>
+
+              <button class="btn-primary fw" onclick={uploadAndSaveElement} disabled={isProcessing}>
+                <Upload size={14} strokeWidth={2} /> Upload &amp; Save Element
               </button>
+              <button class="btn-ghost fw" onclick={addOverlayImage} disabled={!hasProject || isProcessing}>
+                <ImagePlus size={13} strokeWidth={1.75} /> One-Time Image Overlay
+              </button>
+
+              {#if filteredLibrary.length > 0}
+                <div class="section-title">Saved Library ({filteredLibrary.length})</div>
+                <div class="lib-grid">
+                  {#each filteredLibrary as item}
+                    <div
+                      class="lib-card"
+                      onclick={() => addLibraryItemToCanvas(item)}
+                      title={`Click to add ${item.name} (${item.width}×${item.height})`}
+                      role="button"
+                      tabindex="0"
+                    >
+                      <img src={`${convertFileSrc(item.path)}?v=1`} alt={item.name} loading="lazy" />
+                      <button
+                        class="lib-del"
+                        onclick={(e) => deleteLibraryItem(e, item.id)}
+                        title="Remove from library"
+                      >
+                        <X size={10} strokeWidth={2.5} />
+                      </button>
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                <p class="panel-note">Uploaded PNGs &amp; icons are saved here permanently across updates.</p>
+              {/if}
 
               <div class="divider"></div>
               <div class="section-title">Quick Shapes</div>
@@ -477,6 +766,16 @@
                 <div class="color-preview" style="background:{shapeColor};"></div>
                 <input type="text" bind:value={shapeColor} maxlength="7" />
               </div>
+              <label class="checkbox-row">
+                <input type="checkbox" bind:checked={shapeWithBorder} />
+                <span>Add Shape Border</span>
+              </label>
+              {#if shapeWithBorder}
+                <div class="input-grid-2">
+                  <label class="field"><span>Border Hex</span><input type="text" bind:value={shapeBorderColor} maxlength="7" /></label>
+                  <label class="field"><span>Border W</span><input type="number" min="1" max="32" bind:value={shapeBorderWidth} /></label>
+                </div>
+              {/if}
               <div class="btn-grid-3">
                 <button class="btn-ghost" onclick={() => addShape('rectangle')} disabled={!hasProject || isProcessing}>Rect</button>
                 <button class="btn-ghost" onclick={() => addShape('circle')} disabled={!hasProject || isProcessing}>Circle</button>
@@ -484,8 +783,33 @@
               </div>
 
               <div class="divider"></div>
+              <div class="section-title">Watermark Stamp</div>
+              <div class="field-block">
+                <input type="text" bind:value={wmText} placeholder="© Your Brand" />
+              </div>
+              <div class="input-grid-2">
+                <label class="field">
+                  <span>Position</span>
+                  <select class="select-input" bind:value={wmPosition}>
+                    <option value="bottom-right">Bottom Right</option>
+                    <option value="bottom-left">Bottom Left</option>
+                    <option value="top-right">Top Right</option>
+                    <option value="top-left">Top Left</option>
+                    <option value="center">Center</option>
+                  </select>
+                </label>
+                <label class="field"><span>Size (px)</span><input type="number" min="10" max="120" bind:value={wmSize} /></label>
+              </div>
+              <div class="slider-row">
+                <div class="slider-label"><span>Opacity</span><span class="mono">{Math.round(wmOpacity * 100)}%</span></div>
+                <input type="range" min="0.1" max="1" step="0.05" bind:value={wmOpacity} />
+              </div>
+              <button class="btn-ghost fw" onclick={addWatermark} disabled={!hasProject || isProcessing || !wmText.trim()}>
+                <Stamp size={13} strokeWidth={2} /> Add Watermark
+              </button>
+
+              <div class="divider"></div>
               <div class="section-title">Remove Background Color</div>
-              <p class="panel-note">Removes solid color from the selected Image layer to create clean PNG transparency.</p>
               <div class="color-row">
                 <div class="color-preview" style="background:{bgTargetHex};"></div>
                 <input type="text" bind:value={bgTargetHex} maxlength="7" />
@@ -503,16 +827,57 @@
               </button>
             </div>
 
-          <!-- ══ TEXT & 3D ══ -->
+          <!-- ══ TEXT (All Styles + Live Edit) ══ -->
           {:else if activeTool === 'text'}
             <div class="panel">
-              <div class="field-block">
-                <label class="field-lbl">Text Content</label>
-                <textarea class="text-area" bind:value={textContent} rows="2" disabled={!hasProject}></textarea>
+              <div class="search-box">
+                <Search size={13} strokeWidth={1.75} />
+                <input type="text" bind:value={textSearch} placeholder="Search text styles..." />
+              </div>
+
+              <button class="btn-primary fw" onclick={addNewTextLayer} disabled={!hasProject || isProcessing || !textContent.trim()}>
+                <Type size={14} strokeWidth={2} /> Add a text box
+              </button>
+
+              <div class="section-title">Default Text Styles</div>
+              <div class="tier-stack">
+                <button class="tier-btn tier-h1" onclick={() => quickAddTextTier('Add a heading', 112, 'bold_display', 0, 0)} disabled={!hasProject || isProcessing}>
+                  Add a heading
+                </button>
+                <button class="tier-btn tier-h2" onclick={() => quickAddTextTier('Add a subheading', 64, 'modern_sans', 0, 0)} disabled={!hasProject || isProcessing}>
+                  Add a subheading
+                </button>
+                <button class="tier-btn tier-body" onclick={() => quickAddTextTier('Add a little bit of body text', 34, 'modern_sans', 0, 0)} disabled={!hasProject || isProcessing}>
+                  Add a little bit of body text
+                </button>
               </div>
 
               <div class="field-block">
-                <label class="field-lbl">Font Style</label>
+                <label class="field-lbl">Text Effects &amp; 3D Presets</label>
+                <div class="btn-grid-2">
+                  {#each filteredTextPresets as tp}
+                    <button
+                      class="btn-ghost"
+                      onclick={() => {
+                        textDepth = tp.depth;
+                        strokeWidth = tp.strokeW;
+                        if (tp.color) textColor = tp.color;
+                        if (tp.font) fontStyle = tp.font;
+                      }}
+                    >
+                      {tp.label}
+                    </button>
+                  {/each}
+                </div>
+              </div>
+
+              <div class="field-block">
+                <label class="field-lbl">Text Content</label>
+                <textarea class="text-area" bind:this={textInputEl} bind:value={textContent} rows="2" disabled={!hasProject}></textarea>
+              </div>
+
+              <div class="field-block">
+                <label class="field-lbl">Font Family</label>
                 <div class="font-grid">
                   {#each fontStyles as fs}
                     <button class="font-btn" class:selected={fontStyle === fs.id} onclick={() => (fontStyle = fs.id)}>{fs.label}</button>
@@ -523,11 +888,13 @@
               <div class="input-grid-2">
                 <label class="field"><span>Size (px)</span><input type="number" min="12" max="400" bind:value={fontSize} /></label>
                 <label class="field"><span>3D Depth</span><input type="number" min="0" max="30" bind:value={textDepth} /></label>
+                <label class="field"><span>Stroke W</span><input type="number" min="0" max="10" bind:value={strokeWidth} /></label>
+                <label class="field"><span>Fill Hex</span><input type="text" bind:value={textColor} maxlength="7" /></label>
               </div>
 
-              <div class="input-grid-2">
-                <label class="field"><span>Fill Hex</span><input type="text" bind:value={textColor} maxlength="7" /></label>
-                <label class="field"><span>Stroke Hex</span><input type="text" bind:value={strokeColor} maxlength="7" /></label>
+              <div class="field-block">
+                <label class="field-lbl">Stroke Color</label>
+                <input type="text" bind:value={strokeColor} maxlength="7" />
               </div>
 
               <div class="quick-colors">
@@ -535,6 +902,12 @@
                   <button class="color-swatch" style="background:{c};" onclick={() => (textColor = c)} title={c}></button>
                 {/each}
               </div>
+
+              {#if isEditingText}
+                <button class="btn-primary fw" onclick={updateSelectedTextLayer} disabled={isProcessing || !textContent.trim()}>
+                  Update Text Layer
+                </button>
+              {/if}
 
               <div class="btn-grid-2">
                 <button class="btn-ghost" onclick={() => (textX = Math.max(0, Math.round(canvasW * 0.25)))}>
@@ -545,14 +918,67 @@
                 </button>
               </div>
 
-              <div class="input-grid-2">
-                <label class="field"><span>X px</span><input type="number" bind:value={textX} /></label>
-                <label class="field"><span>Y px</span><input type="number" bind:value={textY} /></label>
+              <button class="btn-ghost fw" onclick={addNewTextLayer} disabled={!hasProject || isProcessing || !textContent.trim()}>
+                + Add New Text Layer
+              </button>
+            </div>
+
+          <!-- ══ BACKGROUND ══ -->
+          {:else if activeTool === 'background'}
+            <div class="panel">
+              <div class="btn-grid-3">
+                <button class="btn-ghost" class:selected-ratio={bgMode === 'solid'} onclick={() => (bgMode = 'solid')}>Solid</button>
+                <button class="btn-ghost" class:selected-ratio={bgMode === 'gradient'} onclick={() => (bgMode = 'gradient')}>Gradient</button>
+                <button class="btn-ghost" class:selected-ratio={bgMode === 'transparent'} onclick={() => (bgMode = 'transparent')}>PNG Alpha</button>
               </div>
 
-              <button class="btn-primary fw" onclick={addTextLayer} disabled={!hasProject || isProcessing || !textContent.trim()}>
-                Add 3D Text Layer
+              {#if bgMode === 'solid'}
+                <div class="color-row">
+                  <div class="color-preview" style="background:{bgSolidHex};"></div>
+                  <input type="text" bind:value={bgSolidHex} maxlength="7" />
+                </div>
+                <div class="quick-colors">
+                  {#each quickColors as c}
+                    <button class="color-swatch" style="background:{c};" onclick={() => (bgSolidHex = c)} title={c}></button>
+                  {/each}
+                </div>
+              {:else if bgMode === 'gradient'}
+                <div class="input-grid-2">
+                  <label class="field"><span>From</span><input type="text" bind:value={bgGradFromHex} maxlength="7" /></label>
+                  <label class="field"><span>To</span><input type="text" bind:value={bgGradToHex} maxlength="7" /></label>
+                </div>
+                <div class="slider-row">
+                  <div class="slider-label"><span>Angle</span><span class="mono">{bgGradAngle}°</span></div>
+                  <input type="range" min="0" max="360" step="15" bind:value={bgGradAngle} />
+                </div>
+                <div class="section-title">Gradient Presets</div>
+                <div class="btn-grid-2">
+                  {#each gradientPresets as gp}
+                    <button
+                      class="grad-preset-btn"
+                      onclick={() => {
+                        bgGradFromHex = gp.from;
+                        bgGradToHex = gp.to;
+                      }}
+                    >
+                      <span class="grad-dot" style="background:linear-gradient(135deg,{gp.from},{gp.to});"></span>
+                      <span>{gp.label}</span>
+                    </button>
+                  {/each}
+                </div>
+              {:else}
+                <p class="panel-note">Transparent checkerboard canvas for PNG logos, stickers, and overlays.</p>
+              {/if}
+
+              <button class="btn-primary fw" onclick={applyCanvasBg} disabled={!hasProject || isProcessing}>
+                Apply Canvas Background
               </button>
+
+              {#if bgMode === 'gradient'}
+                <button class="btn-ghost fw" onclick={addGradientLayer} disabled={!hasProject || isProcessing}>
+                  + Add as Gradient Layer
+                </button>
+              {/if}
             </div>
 
           <!-- ══ ADJUST & FILTERS ══ -->
@@ -597,7 +1023,7 @@
               {/if}
             </div>
 
-          <!-- ══ OUTLINE & GLOW ══ -->
+          <!-- ══ OUTLINE ══ -->
           {:else if activeTool === 'outline'}
             <div class="panel">
               {#if !selectedLayer}
@@ -626,28 +1052,40 @@
               {/if}
             </div>
 
-          <!-- ══ MCP AI ══ -->
+          <!-- ══ CROP ══ -->
+          {:else if activeTool === 'crop'}
+            <div class="panel">
+              <p class="panel-note">Drag or resize the blue crop frame on the canvas, or pick a quick aspect ratio:</p>
+              <div class="btn-grid-2">
+                <button class="btn-ghost" class:selected-ratio={cropAspect === null} onclick={() => setCropAspectRatio(null)}>Free</button>
+                <button class="btn-ghost" class:selected-ratio={cropAspect === 16/9} onclick={() => setCropAspectRatio(16 / 9)}>16:9 YouTube</button>
+                <button class="btn-ghost" class:selected-ratio={cropAspect === 1} onclick={() => setCropAspectRatio(1)}>1:1 Logo</button>
+                <button class="btn-ghost" class:selected-ratio={cropAspect === 9/16} onclick={() => setCropAspectRatio(9 / 16)}>9:16 Reels</button>
+              </div>
+              <div class="input-grid-2">
+                <label class="field"><span>X</span><input type="number" bind:value={cropRect.x} /></label>
+                <label class="field"><span>Y</span><input type="number" bind:value={cropRect.y} /></label>
+                <label class="field"><span>W</span><input type="number" min="1" bind:value={cropRect.width} /></label>
+                <label class="field"><span>H</span><input type="number" min="1" bind:value={cropRect.height} /></label>
+              </div>
+              <button class="btn-primary fw" onclick={applyCrop} disabled={!hasProject || isProcessing}>
+                <Crop size={14} strokeWidth={2} /> Apply Crop
+              </button>
+
+              <div class="divider"></div>
+              <div class="section-title">Magic Resize (Scale Layers)</div>
+              <div class="btn-grid-2">
+                <button class="btn-ghost" onclick={() => runCmd('resize_canvas', { width: 1280, height: 720, scaleLayers: true }, 'Magic Resize 1280×720')} disabled={!hasProject || isProcessing}>YT 1280×720</button>
+                <button class="btn-ghost" onclick={() => runCmd('resize_canvas', { width: 1080, height: 1080, scaleLayers: true }, 'Magic Resize 1080×1080')} disabled={!hasProject || isProcessing}>IG 1080×1080</button>
+                <button class="btn-ghost" onclick={() => runCmd('resize_canvas', { width: 1080, height: 1920, scaleLayers: true }, 'Magic Resize 1080×1920')} disabled={!hasProject || isProcessing}>Story 9:16</button>
+                <button class="btn-ghost" onclick={() => runCmd('resize_canvas', { width: 1024, height: 1024, scaleLayers: true }, 'Magic Resize 1024×1024')} disabled={!hasProject || isProcessing}>Logo 1024</button>
+              </div>
+            </div>
+
+          <!-- ══ MCP AI (Universal Auto-Connector) ══ -->
           {:else if activeTool === 'mcp'}
             <div class="panel">
-              <div class="mcp-status-row">
-                <span class="status-dot" class:active={mcpIsActive} class:standby={!mcpIsActive}></span>
-                <span>
-                  {#if mcpIsActive}
-                    <strong style="color:var(--text-primary)">Active &amp; Ready</strong>
-                  {:else}
-                    Standby — Open a project to enable AI
-                  {/if}
-                </span>
-              </div>
-              <p class="panel-note">
-                Claude Desktop can inspect layers, add 3D text, remove backgrounds, and compose thumbnails in real time.
-              </p>
-              <button class="btn-ghost fw" onclick={connectClaude}>
-                <Plug size={13} strokeWidth={2} /> Connect to Claude Desktop
-              </button>
-              {#if connectResult}
-                <p class="connect-result">{connectResult}</p>
-              {/if}
+              <McpPanel compact={true} {mcpIsActive} />
             </div>
           {/if}
         </div>
@@ -662,25 +1100,49 @@
       </button>
     </div>
 
-    <!-- ── Interactive Canvas ─────────────────────────────────────────────── -->
-    <div class="canvas-area" bind:this={canvasArea} use:wheelZoom>
+    <!-- ── Interactive Canvas + Gizmo ─────────────────────────────────────── -->
+    <div
+      class="canvas-area"
+      bind:this={canvasArea}
+      use:wheelZoom
+      onpointerdown={(e) => {
+        if (!cropMode && e.target === canvasArea) selectedLayerId = null;
+      }}
+      role="presentation"
+    >
       {#if hasProject}
         <div
           class="canvas-frame"
           class:transparent-checker={transparentBg}
-          style="width:{canvasW * zoom}px; height:{canvasH * zoom}px; cursor:{selectedLayer && !selectedLayer.locked ? (isDragging ? 'grabbing' : 'grab') : 'default'};"
-          onmousedown={onCanvasMouseDown}
-          role="presentation"
+          style="width:{canvasW * zoom}px; height:{canvasH * zoom}px;"
         >
           <img
             src={previewUrl}
             alt="Veltrax Studios Canvas"
             width={canvasW * zoom}
             height={canvasH * zoom}
-            style="display:block; width:100%; height:100%; object-fit:fill;"
+            style="display:block; width:100%; height:100%; object-fit:fill; pointer-events:none;"
             onload={fitToScreen}
             draggable="false"
           />
+
+          <CanvasGizmo
+            {layers}
+            {selectedLayerId}
+            {canvasW}
+            {canvasH}
+            {zoom}
+            {cropMode}
+            {cropRect}
+            {cropAspect}
+            onSelectLayer={(id) => (selectedLayerId = id)}
+            onDoubleClickText={handleDoubleClickText}
+            onCommitTransform={commitGizmoTransform}
+            onDeleteLayer={(id) => runCmd('delete_layer', { layerId: id }, 'Delete Layer')}
+            onDuplicateLayer={(id) => runCmd('duplicate_layer', { layerId: id }, 'Duplicate Layer')}
+            onCropRectChange={(r) => (cropRect = r)}
+          />
+
           {#if isProcessing}
             <div class="processing-overlay">Rendering layers in Rust…</div>
           {/if}
@@ -758,7 +1220,6 @@
   .fw { width:100%; display:flex; align-items:center; justify-content:center; gap:6px; }
   .panel-note { font-size:12px; color:var(--text-secondary); line-height:1.5; }
 
-  /* Layers list */
   .layer-list { display:flex; flex-direction:column; gap:6px; max-height:240px; overflow-y:auto; }
   .layer-item { display:flex; align-items:center; justify-content:space-between; gap:6px; padding:8px 9px; border-radius:var(--r-sm); background:var(--bg-elevated); border:1.5px solid var(--border); cursor:pointer; }
   .layer-item.selected { border-color:var(--accent); background:var(--accent-subtle); }
@@ -775,6 +1236,7 @@
   .btn-grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
   .btn-grid-3 { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
   .btn-grid-2 button, .btn-grid-3 button { display:flex; align-items:center; justify-content:center; gap:4px; font-size:11px; }
+  .selected-ratio { border-color:var(--accent) !important; background:var(--accent-subtle) !important; color:var(--text-primary) !important; }
   .field { display:flex; flex-direction:column; gap:3px; font-size:10px; color:var(--text-secondary); }
   .field-block { display:flex; flex-direction:column; gap:5px; }
   .field-lbl { font-size:11px; font-weight:600; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.05em; }
@@ -794,18 +1256,42 @@
   .filter-card.selected { border-color:var(--accent); background:var(--accent-subtle); color:var(--text-primary); }
   .filter-thumb { width:34px; height:22px; border-radius:4px; flex-shrink:0; }
 
+  .grad-preset-btn { display:flex; align-items:center; gap:6px; padding:7px 8px; border-radius:var(--r-sm); background:var(--bg-elevated); border:1.5px solid var(--border); color:var(--text-secondary); font-size:11px; text-align:left; }
+  .grad-preset-btn:hover:not(:disabled) { border-color:var(--border-active); color:var(--text-primary); }
+  .grad-dot { width:16px; height:16px; border-radius:4px; flex-shrink:0; border:1px solid var(--border); }
+
+  .search-box { display:flex; align-items:center; gap:7px; background:var(--bg-input); border:1px solid var(--border-input); border-radius:var(--r-sm); padding:0 9px; color:var(--text-muted); }
+  .search-box input { border:none; background:transparent; padding:7px 0; font-size:12px; }
+  .search-box input:focus { border:none; }
+
+  .lib-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:8px; max-height:200px; overflow-y:auto; }
+  .lib-card { position:relative; aspect-ratio:1/1; background:var(--bg-elevated); border:1px solid var(--border); border-radius:var(--r-sm); overflow:hidden; cursor:pointer; display:grid; place-items:center; padding:6px; }
+  .lib-card:hover { border-color:var(--border-active); background:var(--bg-card-hover); }
+  .lib-card img { max-width:100%; max-height:100%; object-fit:contain; }
+  .lib-del { position:absolute; top:4px; right:4px; width:18px; height:18px; border-radius:50%; background:rgba(0,0,0,0.7); color:#fff; display:grid; place-items:center; opacity:0; transition:opacity 0.15s; padding:0; }
+  .lib-card:hover .lib-del { opacity:1; }
+
+  .tier-stack { display:flex; flex-direction:column; gap:6px; }
+  .tier-btn { text-align:left; padding:9px 11px; border-radius:var(--r-sm); background:var(--bg-elevated); border:1px solid var(--border); color:var(--text-primary); }
+  .tier-btn:hover:not(:disabled) { border-color:var(--border-active); background:var(--bg-card-hover); }
+  .tier-h1 { font-size:17px; font-weight:800; }
+  .tier-h2 { font-size:14px; font-weight:600; }
+  .tier-body { font-size:12px; font-weight:400; color:var(--text-secondary); }
+
   .checkbox-row { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text-primary); cursor:pointer; }
   .checkbox-row input { width:auto; accent-color:var(--accent); }
 
-  .mcp-status-row { display:flex; align-items:center; gap:9px; font-size:12px; color:var(--text-secondary); }
+  .diag-box { display:flex; flex-direction:column; gap:8px; background:var(--bg-elevated); border:1px solid var(--border); border-radius:var(--r-sm); padding:10px; }
+  .diag-item { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text-secondary); }
   .status-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
   .status-dot.active { background:#10b981; box-shadow:0 0 8px rgba(16,185,129,0.6); }
   .status-dot.standby { background:#f59e0b; box-shadow:0 0 6px rgba(245,158,11,0.4); }
+  .status-dot.off { background:#ef4444; box-shadow:0 0 6px rgba(239,68,68,0.4); }
+  .restart-note { font-size:11px; color:#fbbf24; }
   .connect-result { font-size:11px; color:#34d399; line-height:1.5; white-space:pre-wrap; }
 
-  /* Canvas */
   .canvas-area { flex:1; min-width:0; min-height:0; position:relative; overflow:auto; display:flex; align-items:center; justify-content:center; }
-  .canvas-frame { position:relative; flex-shrink:0; border-radius:4px; overflow:hidden; box-shadow:0 0 0 1px rgba(255,255,255,0.08),0 24px 60px rgba(0,0,0,0.6); }
+  .canvas-frame { position:relative; flex-shrink:0; border-radius:4px; overflow:visible; box-shadow:0 0 0 1px rgba(255,255,255,0.08),0 24px 60px rgba(0,0,0,0.6); }
   .canvas-frame.transparent-checker {
     background-image:
       linear-gradient(45deg, #252933 25%, transparent 25%),
@@ -816,13 +1302,13 @@
     background-position: 0 0, 0 10px, 10px -10px, -10px 0;
     background-color: #161920;
   }
-  .processing-overlay { position:absolute; inset:0; background:rgba(13,15,18,0.7); backdrop-filter:blur(4px); display:grid; place-items:center; font-size:13px; font-weight:600; color:var(--text-secondary); }
+  .processing-overlay { position:absolute; inset:0; background:rgba(13,15,18,0.7); backdrop-filter:blur(4px); display:grid; place-items:center; font-size:13px; font-weight:600; color:var(--text-secondary); z-index:50; }
   .empty-canvas { display:flex; flex-direction:column; align-items:center; gap:14px; text-align:center; color:var(--text-secondary); max-width:320px; }
   .empty-canvas h3 { font-size:17px; color:var(--text-primary); }
   .empty-canvas p { font-size:13px; }
   .empty-canvas button { display:flex; align-items:center; gap:6px; }
 
-  .bottom-bar { position:absolute; bottom:14px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:14px; background:var(--bg-elevated); border:1px solid var(--border); border-radius:999px; padding:6px 14px; }
+  .bottom-bar { position:absolute; bottom:14px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:14px; background:var(--bg-elevated); border:1px solid var(--border); border-radius:999px; padding:6px 14px; z-index:60; }
   .step-pill { font-size:12px; color:var(--text-secondary); display:flex; align-items:center; gap:6px; white-space:nowrap; }
   .err-dot { color:#f87171; font-weight:700; }
   .zoom-controls { display:flex; align-items:center; gap:5px; }

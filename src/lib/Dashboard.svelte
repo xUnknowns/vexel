@@ -1,9 +1,10 @@
 <script>
   import {
     Plus, Paintbrush2, Home, Bot,
-    FolderOpen, Youtube, Instagram, Smartphone, LayoutGrid, Plug, Layers
+    FolderOpen, Youtube, Instagram, Smartphone, LayoutGrid, Layers
   } from 'lucide-svelte';
-  import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+  import { convertFileSrc } from '@tauri-apps/api/core';
+  import McpPanel from './McpPanel.svelte';
 
   let {
     recentProjects = [],
@@ -17,7 +18,6 @@
   } = $props();
 
   let subView = $state('home'); // 'home' | 'mcp'
-  let connectResult = $state('');
 
   const quickPresets = [
     { label: 'Open Image', sub: null, icon: FolderOpen, action: 'open' },
@@ -33,14 +33,6 @@
     else if (item.action === 'modal') onShowModal();
     else if (item.action === 'preset' && onCreatePreset) {
       onCreatePreset(item.w, item.h, item.name, Boolean(item.transparent));
-    }
-  }
-
-  async function connectClaude() {
-    try {
-      connectResult = await invoke('connect_claude_desktop');
-    } catch (e) {
-      connectResult = `Error: ${e}`;
     }
   }
 </script>
@@ -84,6 +76,7 @@
     </nav>
 
     <div class="sidebar-footer">
+      <span class="ver-tag" title="Veltrax Studios v1.0">v1.0</span>
       <div class="engine-dot" title="Rust layer engine online"></div>
     </div>
   </aside>
@@ -155,49 +148,12 @@
       <div class="mcp-view">
         <div class="mcp-card">
           <div class="mcp-badge">Model Context Protocol</div>
-          <h2>Connect AI (MCP)</h2>
+          <h2>Connect AI Assistant (MCP)</h2>
           <p>
-            Connect Veltrax Studios' non-destructive Rust layer engine directly to <strong>Claude Desktop</strong>.
-            Claude can inspect your layers, add 3D text, remove backgrounds, apply outlines, and compose thumbnails.
+            Universal MCP bridge to connect any compatible desktop AI (Claude Desktop, LM Studio, ChatGPT / Codex, Cursor, Perplexity) to Veltrax Studios.
           </p>
 
-          <div class="mcp-status">
-            <span class="status-dot" class:active={mcpIsActive} class:standby={!mcpIsActive}></span>
-            <span>
-              {#if mcpIsActive}
-                <strong style="color:var(--text-primary)">Active &amp; Ready</strong>
-              {:else}
-                Standby — Open or create a project in the Editor to enable AI
-              {/if}
-            </span>
-          </div>
-
-          <div class="mcp-commands">
-            <h3>Exposed MCP tools</h3>
-            <ul>
-              <li><code>inspect_project</code></li>
-              <li><code>add_image_overlay</code></li>
-              <li><code>remove_background_color</code></li>
-              <li><code>add_3d_text</code></li>
-              <li><code>add_shape</code></li>
-              <li><code>set_layer_outline</code></li>
-              <li><code>update_layer_transform</code></li>
-              <li><code>update_layer_effects</code></li>
-              <li><code>reorder_layer</code></li>
-              <li><code>delete_layer</code></li>
-              <li><code>undo</code></li>
-            </ul>
-          </div>
-
-          <div class="mcp-actions">
-            <button class="btn-primary icon-btn" onclick={connectClaude}>
-              <Plug size={15} strokeWidth={2} /> Connect to Claude Desktop
-            </button>
-          </div>
-
-          {#if connectResult}
-            <pre class="connect-result">{connectResult}</pre>
-          {/if}
+          <McpPanel compact={false} {mcpIsActive} />
         </div>
       </div>
     {/if}
@@ -232,7 +188,8 @@
   .g-nav-icon { display:flex; align-items:center; justify-content:center; }
   .g-nav-label { font-size:10px; font-weight:500; letter-spacing:0.01em; }
 
-  .sidebar-footer { margin-top:auto; }
+  .sidebar-footer { margin-top:auto; display:flex; flex-direction:column; align-items:center; gap:6px; }
+  .ver-tag { font-size:10px; font-weight:600; color:var(--text-muted); }
   .engine-dot { width:8px; height:8px; border-radius:50%; background:#10b981; box-shadow:0 0 8px rgba(16,185,129,0.6); }
 
   .d-main { flex:1; min-width:0; overflow:hidden; display:flex; flex-direction:column; }
@@ -273,22 +230,22 @@
   .empty-state p { font-size:13px; max-width:340px; }
 
   .mcp-view { flex:1; padding:40px 48px; display:flex; align-items:flex-start; overflow-y:auto; }
-  .mcp-card { max-width:600px; display:flex; flex-direction:column; gap:20px; }
+  .mcp-card { max-width:600px; display:flex; flex-direction:column; gap:18px; }
   .mcp-badge { display:inline-block; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color:#a5b4fc; background:var(--accent-subtle); border:1px solid var(--border-active); padding:5px 10px; border-radius:999px; width:fit-content; }
   .mcp-card h2 { font-size:24px; font-weight:700; }
   .mcp-card p { font-size:14px; color:var(--text-secondary); line-height:1.65; }
   .mcp-card strong { color:var(--text-primary); }
-  .mcp-status { display:flex; align-items:center; gap:9px; font-size:13px; color:var(--text-secondary); }
+
+  .diag-grid { display:flex; flex-direction:column; gap:10px; background:var(--bg-card); border:1px solid var(--border); border-radius:var(--r-md); padding:16px; }
+  .diag-row { display:flex; align-items:center; gap:10px; font-size:13px; color:var(--text-secondary); }
   .status-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
   .status-dot.active { background:#10b981; box-shadow:0 0 8px rgba(16,185,129,0.6); }
   .status-dot.standby { background:#f59e0b; box-shadow:0 0 8px rgba(245,158,11,0.5); }
-  .mcp-commands { display:flex; flex-direction:column; gap:10px; }
-  .mcp-commands h3 { font-size:13px; font-weight:600; color:var(--text-secondary); }
-  .mcp-commands ul { display:flex; flex-wrap:wrap; gap:8px; list-style:none; }
-  .mcp-commands li { background:var(--bg-elevated); border:1px solid var(--border); border-radius:var(--r-sm); padding:5px 10px; }
-  code { font-family:var(--mono); font-size:12px; color:#c7d2fe; }
-  .mcp-actions { display:flex; gap:10px; }
+  .status-dot.off { background:#ef4444; box-shadow:0 0 8px rgba(239,68,68,0.5); }
+
+  .mcp-actions { display:flex; gap:10px; flex-wrap:wrap; }
   .icon-btn { display:flex; align-items:center; gap:7px; }
+  .restart-warn { font-size:12px; color:#fbbf24; background:rgba(245,158,11,0.12); border:1px solid rgba(245,158,11,0.35); border-radius:var(--r-sm); padding:10px 12px; }
   .connect-result {
     font-family:var(--mono); font-size:12px; color:#34d399;
     background:var(--bg-card); border:1px solid var(--border);

@@ -34,12 +34,24 @@ fn main() {
             tools::save_project_file,
             tools::load_project_file,
             tools::export_configured,
+            tools::get_default_projects_dir,
+            tools::get_user_library,
+            tools::save_to_user_library,
+            tools::delete_from_user_library,
+            // Canvas background & resize
+            tools::set_canvas_background,
+            tools::resize_canvas,
             // Layer operations
             tools::add_image_overlay_layer,
             tools::remove_layer_background_color,
             tools::add_text_layer,
+            tools::update_text_layer,
+            tools::crop_canvas,
             tools::add_shape_layer,
+            tools::add_gradient_layer,
+            tools::add_watermark_layer,
             tools::update_layer_transform,
+            tools::flip_layer,
             tools::update_layer_effects,
             tools::set_layer_outline,
             tools::reorder_layer,
@@ -51,6 +63,12 @@ fn main() {
             tools::redo_action,
             // MCP
             mcp::connect_claude_desktop,
+            mcp::check_mcp_real_status,
+            mcp::scan_desktop_ai_clients,
+            mcp::connect_ai_client,
+            mcp::disconnect_ai_client,
+            mcp::connect_all_detected,
+            mcp::get_mcp_snippets,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Veltrax Studios");

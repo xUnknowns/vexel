@@ -67,6 +67,27 @@ pub enum LayerKind {
         height: u32,
         fill_color: [u8; 4],
         border_radius: u32,
+        #[serde(default)]
+        border_color: [u8; 4],
+        #[serde(default)]
+        border_width: u32,
+    },
+    Gradient {
+        width: u32,
+        height: u32,
+        from_color: [u8; 4],
+        to_color: [u8; 4],
+        angle: f32, // degrees: 0=top→bottom, 90=left→right
+    },
+    Watermark {
+        text: String,
+        font_style: String,
+        color: [u8; 4],
+        size: f32,
+        position: String, // "top-left"|"top-right"|"bottom-left"|"bottom-right"|"center"
+        opacity: f32,
+        canvas_width: u32,
+        canvas_height: u32,
     },
 }
 
@@ -81,7 +102,15 @@ pub struct Layer {
     pub y: i64,
     pub scale: f32,
     pub rotation: f32,
+    #[serde(default)]
+    pub flip_h: bool,
+    #[serde(default)]
+    pub flip_v: bool,
     pub blend_mode: String, // "normal" | "multiply" | "screen" | "overlay"
+    #[serde(default)]
+    pub bounds_width: u32,
+    #[serde(default)]
+    pub bounds_height: u32,
     pub effects: LayerEffects,
     pub outline: LayerOutline,
     pub kind: LayerKind,
@@ -94,7 +123,16 @@ pub struct ProjectSnapshot {
     pub canvas_height: u32,
     pub transparent_bg: bool,
     pub bg_color: [u8; 4],
+    #[serde(default)]
+    pub bg_gradient: Option<BgGradient>,
     pub layers: Vec<Layer>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BgGradient {
+    pub from_color: [u8; 4],
+    pub to_color: [u8; 4],
+    pub angle: f32, // degrees
 }
 
 impl Default for ProjectSnapshot {
@@ -105,6 +143,7 @@ impl Default for ProjectSnapshot {
             canvas_height: 720,
             transparent_bg: false,
             bg_color: [255, 255, 255, 255],
+            bg_gradient: None,
             layers: Vec::new(),
         }
     }
@@ -143,6 +182,8 @@ pub struct ProjectResponse {
     pub canvas_width: u32,
     pub canvas_height: u32,
     pub transparent_bg: bool,
+    pub bg_color: [u8; 4],
+    pub bg_gradient: Option<BgGradient>,
     pub layers: Vec<Layer>,
     pub can_undo: bool,
     pub can_redo: bool,
@@ -171,6 +212,8 @@ impl ProjectState {
             canvas_width: self.current.canvas_width,
             canvas_height: self.current.canvas_height,
             transparent_bg: self.current.transparent_bg,
+            bg_color: self.current.bg_color,
+            bg_gradient: self.current.bg_gradient.clone(),
             layers: self.current.layers.clone(),
             can_undo: !self.undo_stack.is_empty(),
             can_redo: !self.redo_stack.is_empty(),
@@ -242,27 +285,31 @@ fn load_font_bytes(style: &str) -> Result<Vec<u8>, String> {
 // ── Layer Rendering & Compositing ───────────────────────────────────────────
 
 pub fn render_project_composite(
-    snapshot: &ProjectSnapshot,
+    snapshot: &mut ProjectSnapshot,
     dest_path: &str,
 ) -> Result<DynamicImage, String> {
-    let bg = if snapshot.transparent_bg {
-        Rgba([0, 0, 0, 0])
-    } else {
-        Rgba(snapshot.bg_color)
-    };
-    let mut canvas = RgbaImage::from_pixel(
-        snapshot.canvas_width.max(1),
-        snapshot.canvas_height.max(1),
-        bg,
-    );
+    let cw = snapshot.canvas_width.max(1);
+    let ch = snapshot.canvas_height.max(1);
 
-    for layer in &snapshot.layers {
-        if !layer.visible || layer.opacity <= 0.001 {
-            continue;
-        }
+    // Build background canvas
+    let mut canvas = if snapshot.transparent_bg {
+        RgbaImage::from_pixel(cw, ch, Rgba([0, 0, 0, 0]))
+    } else if let Some(ref grad) = snapshot.bg_gradient {
+        render_gradient_image(cw, ch, grad.from_color, grad.to_color, grad.angle)
+    } else {
+        RgbaImage::from_pixel(cw, ch, Rgba(snapshot.bg_color))
+    };
+
+    for layer in &mut snapshot.layers {
         let Ok(mut layer_img) = render_layer_kind(&layer.kind) else {
             continue;
         };
+        layer.bounds_width = layer_img.width();
+        layer.bounds_height = layer_img.height();
+
+        if !layer.visible || layer.opacity <= 0.001 {
+            continue;
+        }
 
         layer_img = apply_layer_effects(layer_img, &layer.effects);
 
@@ -276,6 +323,13 @@ pub fn render_project_composite(
 
         if layer.rotation.abs() > 0.1 {
             layer_img = rotate_rgba_bilinear(&layer_img, layer.rotation);
+        }
+
+        if layer.flip_h {
+            layer_img = image::imageops::flip_horizontal(&layer_img);
+        }
+        if layer.flip_v {
+            layer_img = image::imageops::flip_vertical(&layer_img);
         }
 
         if layer.outline.enabled && layer.outline.thickness > 0 {
@@ -354,13 +408,48 @@ fn render_layer_kind(kind: &LayerKind) -> Result<RgbaImage, String> {
             height,
             fill_color,
             border_radius,
+            border_color,
+            border_width,
         } => Ok(render_shape(
             shape_type,
             (*width).max(1),
             (*height).max(1),
             *fill_color,
             *border_radius,
+            *border_color,
+            *border_width,
         )),
+        LayerKind::Gradient {
+            width,
+            height,
+            from_color,
+            to_color,
+            angle,
+        } => Ok(render_gradient_image(
+            (*width).max(1),
+            (*height).max(1),
+            *from_color,
+            *to_color,
+            *angle,
+        )),
+        LayerKind::Watermark {
+            text,
+            font_style,
+            color,
+            size,
+            position,
+            opacity: _,
+            canvas_width,
+            canvas_height,
+        } => render_watermark_layer(
+            text,
+            font_style,
+            *color,
+            *size,
+            position,
+            *canvas_width,
+            *canvas_height,
+        ),
     }
 }
 
@@ -488,6 +577,8 @@ fn render_shape(
     height: u32,
     fill_color: [u8; 4],
     border_radius: u32,
+    border_color: [u8; 4],
+    border_width: u32,
 ) -> RgbaImage {
     let mut img = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 0]));
     let r = match shape_type {
@@ -512,11 +603,81 @@ fn render_shape(
                 true
             };
             if inside {
-                img.put_pixel(x, y, Rgba(fill_color));
+                // Check if pixel is on the border
+                let bw = border_width as i32;
+                let on_border = if border_width > 0 && border_color[3] > 0 {
+                    let near_edge = (x as i32) < bw
+                        || (x as i32) >= (width as i32 - bw)
+                        || (y as i32) < bw
+                        || (y as i32) >= (height as i32 - bw);
+                    near_edge
+                } else {
+                    false
+                };
+                img.put_pixel(x, y, if on_border { Rgba(border_color) } else { Rgba(fill_color) });
             }
         }
     }
     img
+}
+
+fn render_gradient_image(
+    width: u32,
+    height: u32,
+    from_color: [u8; 4],
+    to_color: [u8; 4],
+    angle: f32,
+) -> RgbaImage {
+    let mut img = RgbaImage::new(width, height);
+    let rad = angle.to_radians();
+    let cos_a = rad.cos();
+    let sin_a = rad.sin();
+    let (cw, ch) = (width as f32, height as f32);
+    // Max projection so gradient covers full canvas regardless of angle
+    let max_proj = (cw * cos_a.abs() + ch * sin_a.abs()).max(1.0);
+
+    for y in 0..height {
+        for x in 0..width {
+            // Project pixel onto gradient direction
+            let px = x as f32 - cw / 2.0;
+            let py = y as f32 - ch / 2.0;
+            let proj = px * sin_a + py * cos_a; // along angle direction
+            let t = ((proj + max_proj / 2.0) / max_proj).clamp(0.0, 1.0);
+
+            let r = (from_color[0] as f32 + t * (to_color[0] as f32 - from_color[0] as f32)) as u8;
+            let g = (from_color[1] as f32 + t * (to_color[1] as f32 - from_color[1] as f32)) as u8;
+            let b = (from_color[2] as f32 + t * (to_color[2] as f32 - from_color[2] as f32)) as u8;
+            let a = (from_color[3] as f32 + t * (to_color[3] as f32 - from_color[3] as f32)) as u8;
+            img.put_pixel(x, y, Rgba([r, g, b, a]));
+        }
+    }
+    img
+}
+
+fn render_watermark_layer(
+    text: &str,
+    font_style: &str,
+    color: [u8; 4],
+    size: f32,
+    position: &str,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> Result<RgbaImage, String> {
+    // Render the text, then place it on a transparent canvas at the right corner
+    let text_img = render_text_3d(text, font_style, color, 0, [0, 0, 0, 0], [0, 0, 0, 0], 0, size)?;
+    let mut canvas = RgbaImage::from_pixel(canvas_width, canvas_height, Rgba([0, 0, 0, 0]));
+    let tw = text_img.width();
+    let th = text_img.height();
+    let margin = 20i64;
+    let (px, py): (i64, i64) = match position {
+        "top-left"     => (margin, margin),
+        "top-right"    => ((canvas_width as i64 - tw as i64 - margin).max(0), margin),
+        "bottom-left"  => (margin, (canvas_height as i64 - th as i64 - margin).max(0)),
+        "center"       => ((canvas_width as i64 - tw as i64) / 2, (canvas_height as i64 - th as i64) / 2),
+        _              => ((canvas_width as i64 - tw as i64 - margin).max(0), (canvas_height as i64 - th as i64 - margin).max(0)), // bottom-right
+    };
+    composite_layer(&mut canvas, &text_img, px, py, 1.0, "normal");
+    Ok(canvas)
 }
 
 fn rounded_rect_hit(x: f32, y: f32, w: f32, h: f32, r: f32) -> bool {
