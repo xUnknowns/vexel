@@ -3,7 +3,7 @@ use crate::layers::{
 };
 use crate::tools::{internal_get_preview_base64, render_and_respond};
 use serde_json::{json, Value};
-use std::io::{BufRead, Read, Write};
+use std::io::{BufRead, Write};
 use tauri::Emitter;
 
 // ── Universal MCP Auto-Connector ────────────────────────────────────────────

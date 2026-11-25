@@ -1,6 +1,6 @@
 use crate::layers::{
-    parse_hex_color, render_project_composite, Layer, LayerEffects, LayerKind, LayerOutline,
-    ProjectResponse, ProjectSnapshot, ProjectState, SharedProjectState,
+    parse_hex_color, render_project_composite, BgGradient, Layer, LayerEffects, LayerKind,
+    LayerOutline, ProjectResponse, ProjectSnapshot, ProjectState, SharedProjectState,
 };
 use image::imageops::FilterType;
 use std::path::Path;
