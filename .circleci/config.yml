@@ -1,0 +1,16 @@
+version: 2.1
+
+jobs:
+  build:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - run:
+          name: Placeholder
+          command: echo "No build, test, or lint commands configured yet."
+
+workflows:
+  main:
+    jobs:
+      - build
