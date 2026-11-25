@@ -1,48 +1,12 @@
-use serde::{Deserialize, Serialize};
+use crate::layers::{
+    parse_hex_color, Layer, LayerEffects, LayerKind, LayerOutline, SharedProjectState,
+};
+use crate::tools::{internal_get_preview_base64, render_and_respond};
 use serde_json::{json, Value};
-use std::sync::{Arc, Mutex};
+use std::io::{BufRead, Read, Write};
 use tauri::Emitter;
 
-// ── Shared editor state ──────────────────────────────────────────────────
-
-#[derive(Default, Clone, Serialize, Deserialize)]
-pub struct EditorState {
-    pub is_in_editor: bool,
-    pub active_image_path: Option<String>,
-}
-
-pub type SharedEditorState = Arc<Mutex<EditorState>>;
-
-// ── Tauri commands ───────────────────────────────────────────────────────
-
-#[tauri::command]
-pub fn update_editor_state(
-    state: tauri::State<'_, SharedEditorState>,
-    is_in_editor: bool,
-    active_image_path: Option<String>,
-) -> Result<(), String> {
-    let mut s = state.lock().map_err(|e| e.to_string())?;
-    s.is_in_editor = is_in_editor;
-    s.active_image_path = active_image_path;
-    Ok(())
-}
-
-#[derive(Serialize)]
-pub struct EditorStateInfo {
-    pub is_in_editor: bool,
-    pub has_image: bool,
-}
-
-#[tauri::command]
-pub fn get_editor_state_info(
-    state: tauri::State<'_, SharedEditorState>,
-) -> Result<EditorStateInfo, String> {
-    let s = state.lock().map_err(|e| e.to_string())?;
-    Ok(EditorStateInfo {
-        is_in_editor: s.is_in_editor,
-        has_image: s.active_image_path.is_some(),
-    })
-}
+// ── Connect to Claude Desktop ───────────────────────────────────────────────
 
 #[tauri::command]
 pub fn connect_claude_desktop() -> Result<String, String> {
@@ -52,7 +16,7 @@ pub fn connect_claude_desktop() -> Result<String, String> {
     let appdata = std::env::var("APPDATA")
         .unwrap_or_else(|_| r"C:\Users\Public\AppData\Roaming".to_string());
 
-    let config_dir  = std::path::Path::new(&appdata).join("Claude");
+    let config_dir = std::path::Path::new(&appdata).join("Claude");
     let config_path = config_dir.join("claude_desktop_config.json");
 
     std::fs::create_dir_all(&config_dir)
@@ -70,9 +34,9 @@ pub fn connect_claude_desktop() -> Result<String, String> {
     }
 
     config["mcpServers"]["veltrax-studios"] = json!({
-        "command": exe_path.to_string_lossy().replace('\\', '/'),
-        "args":    ["--mcp"],
-        "description": "Veltrax Studios AI-powered image editor by Crafters Apex"
+        "command": exe_path.to_string_lossy().replace('\\', "/"),
+        "args": ["--mcp"],
+        "description": "Veltrax Studios non-destructive layer editor by Crafters Apex"
     });
 
     let pretty = serde_json::to_string_pretty(&config)
@@ -81,197 +45,404 @@ pub fn connect_claude_desktop() -> Result<String, String> {
         .map_err(|e| format!("Failed to write config: {}", e))?;
 
     Ok(format!(
-        "Veltrax Studios successfully connected to Claude Desktop.\nConfig written to: {}",
+        "Veltrax Studios connected to Claude Desktop.\nConfig written to: {}",
         config_path.display()
     ))
 }
 
-// ── Internal HTTP server (runs inside the Tauri GUI process) ─────────────
+// ── Internal HTTP Bridge (127.0.0.1:3847) ───────────────────────────────────
 
-pub fn start_internal_server(state: SharedEditorState, app_handle: tauri::AppHandle) {
+pub fn start_internal_server(state: SharedProjectState, app_handle: tauri::AppHandle) {
     std::thread::spawn(move || {
         let server = match tiny_http::Server::http("127.0.0.1:3847") {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[Veltrax Studios MCP] HTTP server failed to start on port 3847: {}", e);
+                eprintln!("[Veltrax Studios MCP] Server failed on port 3847: {}", e);
                 return;
             }
         };
-        eprintln!("[Veltrax Studios MCP] Internal HTTP server listening on 127.0.0.1:3847");
+        eprintln!("[Veltrax Studios MCP] Listening on 127.0.0.1:3847");
 
         for mut request in server.incoming_requests() {
-            use std::io::Read;
             let mut body = String::new();
             request.as_reader().read_to_string(&mut body).ok();
 
-            let url        = request.url().to_string();
+            let url = request.url().to_string();
             let response_v = handle_internal_request(&url, &body, &state, &app_handle);
             let response_s = serde_json::to_string(&response_v).unwrap_or_default();
 
-            let resp = tiny_http::Response::from_string(response_s)
-                .with_header(
-                    tiny_http::Header::from_bytes(b"Content-Type", b"application/json").unwrap(),
-                );
+            let resp = tiny_http::Response::from_string(response_s).with_header(
+                tiny_http::Header::from_bytes(b"Content-Type", b"application/json").unwrap(),
+            );
             let _ = request.respond(resp);
         }
     });
 }
 
+fn blocked_response() -> Value {
+    json!({
+        "error": "blocked",
+        "message": "Action blocked: Veltrax Studios is currently on the Dashboard. Ask the user to open or create a project in the Editor first."
+    })
+}
+
 fn handle_internal_request(
-    url:        &str,
-    body:       &str,
-    state:      &SharedEditorState,
+    url: &str,
+    body: &str,
+    state: &SharedProjectState,
     app_handle: &tauri::AppHandle,
 ) -> Value {
-    let (is_in_editor, active_path) = {
-        let s = state.lock().unwrap();
-        (s.is_in_editor, s.active_image_path.clone())
-    };
-
     match url {
-        // ── State probe ──────────────────────────────────────────────
-        "/state" => json!({
-            "is_in_editor": is_in_editor,
-            "has_image":    active_path.is_some(),
-        }),
-
-        // ── Inspect canvas ───────────────────────────────────────────
         "/tool/inspect" => {
-            if !is_in_editor || active_path.is_none() {
+            let s = state.lock().unwrap();
+            if !s.is_in_editor || !s.has_project || s.preview_path.is_empty() {
                 return blocked_response();
             }
-            let path = active_path.unwrap();
-            match crate::tools::internal_get_preview(&path) {
-                Ok((b64, w, h)) => json!({ "success": true, "image_base64": b64, "width": w, "height": h }),
-                Err(e)          => json!({ "error": e }),
-            }
-        }
+            let layers_json = serde_json::to_value(&s.current.layers).unwrap_or(json!([]));
+            let (w, h) = (s.current.canvas_width, s.current.canvas_height);
+            let preview_path = s.preview_path.clone();
+            let transparent = s.current.transparent_bg;
+            drop(s);
 
-        // ── Execute a tool ───────────────────────────────────────────
-        "/tool/execute" => {
-            if !is_in_editor || active_path.is_none() {
-                return blocked_response();
-            }
-            let source = active_path.unwrap();
-            let params: Value = serde_json::from_str(body).unwrap_or(json!({}));
-            let tool   = params["tool"].as_str().unwrap_or("");
-
-            let dir  = std::env::temp_dir();
-            let dest = dir.join(format!(
-                "veltrax-mcp-{}.png",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-            ));
-            let dest_str = dest.to_string_lossy().to_string();
-
-            let result = match tool {
-                "apply_filter" => {
-                    let f = params["filter"].as_str().unwrap_or("grayscale").to_string();
-                    crate::tools::apply_filter(source.clone(), dest_str.clone(), f)
-                }
-                "adjust" => {
-                    let b = params["brightness"].as_f64().unwrap_or(0.0) as i32;
-                    let c = params["contrast"].as_f64().unwrap_or(0.0) as f32;
-                    let s = params["saturation"].as_f64().unwrap_or(0.0) as f32;
-                    crate::tools::adjust_brightness_contrast_saturation(source.clone(), dest_str.clone(), b, c, s)
-                }
-                "transform" => {
-                    let a = params["action"].as_str().unwrap_or("rotate90").to_string();
-                    crate::tools::transform_image(source.clone(), dest_str.clone(), a)
-                }
-                "crop" => {
-                    let x = params["x"].as_u64().unwrap_or(0) as u32;
-                    let y = params["y"].as_u64().unwrap_or(0) as u32;
-                    let w = params["width"].as_u64().unwrap_or(100) as u32;
-                    let h = params["height"].as_u64().unwrap_or(100) as u32;
-                    crate::tools::crop_image(source.clone(), dest_str.clone(), x, y, w, h)
-                }
-                "resize" => {
-                    let w = params["new_width"].as_u64().unwrap_or(800) as u32;
-                    let h = params["new_height"].as_u64().unwrap_or(600) as u32;
-                    crate::tools::resize_image(source.clone(), dest_str.clone(), w, h)
-                }
-                other => Err(format!("Unknown tool: '{}'", other)),
-            };
-
-            match result {
+            match internal_get_preview_base64(&preview_path) {
+                Ok((b64, _, _)) => json!({
+                    "success": true,
+                    "canvas_width": w,
+                    "canvas_height": h,
+                    "transparent_bg": transparent,
+                    "layers": layers_json,
+                    "image_base64": b64
+                }),
                 Err(e) => json!({ "error": e }),
-                Ok(new_path) => {
-                    // Update active path in shared state
-                    state.lock().unwrap().active_image_path = Some(new_path.clone());
-
-                    // Notify Svelte to refresh the canvas
-                    let _ = app_handle.emit("mcp-image-updated", new_path.clone());
-
-                    // Return preview
-                    match crate::tools::internal_get_preview(&new_path) {
-                        Ok((b64, w, h)) => json!({
-                            "success":      true,
-                            "new_path":     new_path,
-                            "image_base64": b64,
-                            "width":        w,
-                            "height":       h,
-                        }),
-                        Err(_) => json!({ "success": true, "new_path": new_path }),
-                    }
-                }
             }
         }
+        "/tool/execute" => {
+            let params: Value = serde_json::from_str(body).unwrap_or(json!({}));
+            let tool = params["tool"].as_str().unwrap_or("");
 
+            let mut s = state.lock().unwrap();
+            if !s.is_in_editor || !s.has_project {
+                return blocked_response();
+            }
+
+            let exec_res = execute_mcp_layer_tool(&mut s, tool, &params);
+            let resp_obj = match exec_res {
+                Ok(resp) => resp,
+                Err(e) => return json!({ "error": e }),
+            };
+            let preview_path = s.preview_path.clone();
+            let (cw, ch) = (s.current.canvas_width, s.current.canvas_height);
+            let layers_json = serde_json::to_value(&s.current.layers).unwrap_or(json!([]));
+            drop(s);
+
+            let _ = app_handle.emit("mcp-project-updated", resp_obj);
+
+            match internal_get_preview_base64(&preview_path) {
+                Ok((b64, _, _)) => json!({
+                    "success": true,
+                    "canvas_width": cw,
+                    "canvas_height": ch,
+                    "layers": layers_json,
+                    "image_base64": b64
+                }),
+                Err(e) => json!({ "error": e }),
+            }
+        }
         _ => json!({ "error": "Not found" }),
     }
 }
 
-fn blocked_response() -> Value {
-    json!({
-        "error":   "blocked",
-        "message": "Action blocked: Veltrax Studios is currently on the Dashboard or has no active image. Ask the user to open an image in the Editor first."
-    })
+fn execute_mcp_layer_tool(
+    s: &mut crate::layers::ProjectState,
+    tool: &str,
+    p: &Value,
+) -> Result<crate::layers::ProjectResponse, String> {
+    match tool {
+        "add_image_overlay" => {
+            let path = p["image_path"]
+                .as_str()
+                .ok_or("Missing 'image_path'")?
+                .to_string();
+            image::open(&path).map_err(|e| format!("Failed to open '{}': {}", path, e))?;
+            let name = std::path::Path::new(&path)
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Overlay")
+                .to_string();
+            s.push_undo();
+            let id = s.next_id();
+            s.current.layers.push(Layer {
+                id,
+                name,
+                visible: true,
+                locked: false,
+                opacity: 1.0,
+                x: p["x"].as_i64().unwrap_or(40),
+                y: p["y"].as_i64().unwrap_or(40),
+                scale: p["scale"].as_f64().unwrap_or(1.0) as f32,
+                rotation: 0.0,
+                blend_mode: "normal".to_string(),
+                effects: LayerEffects::default(),
+                outline: LayerOutline::default(),
+                kind: LayerKind::Image {
+                    source_path: path,
+                    bg_remove_color: None,
+                    bg_remove_tolerance: 30,
+                },
+            });
+            render_and_respond(s)
+        }
+        "remove_background_color" => {
+            let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
+            let hex = p["target_hex"].as_str().unwrap_or("#FFFFFF");
+            let tol = p["tolerance"].as_u64().unwrap_or(35).min(255) as u8;
+            s.push_undo();
+            let target = parse_hex_color(hex);
+            let layer = s
+                .current
+                .layers
+                .iter_mut()
+                .find(|l| l.id == lid)
+                .ok_or_else(|| format!("Layer '{}' not found", lid))?;
+            match &mut layer.kind {
+                LayerKind::Image {
+                    bg_remove_color,
+                    bg_remove_tolerance,
+                    ..
+                } => {
+                    *bg_remove_color = Some(target);
+                    *bg_remove_tolerance = tol;
+                }
+                _ => return Err("Layer is not an Image layer".to_string()),
+            }
+            render_and_respond(s)
+        }
+        "add_3d_text" => {
+            let content = p["content"].as_str().ok_or("Missing 'content'")?.to_string();
+            let font_style = p["font_style"].as_str().unwrap_or("bold_display").to_string();
+            let size = p["size"].as_f64().unwrap_or(72.0) as f32;
+            let color = parse_hex_color(p["color_hex"].as_str().unwrap_or("#FFFFFF"));
+            let depth = p["depth_3d"].as_u64().unwrap_or(6) as u32;
+            let stroke = parse_hex_color(p["stroke_hex"].as_str().unwrap_or("#000000"));
+            let stroke_w = p["stroke_width"].as_u64().unwrap_or(3) as u32;
+            let x = p["x"].as_i64().unwrap_or(60);
+            let y = p["y"].as_i64().unwrap_or(60);
+            s.push_undo();
+            let id = s.next_id();
+            let label: String = content.chars().take(18).collect();
+            s.current.layers.push(Layer {
+                id,
+                name: format!("Text: {}", label),
+                visible: true,
+                locked: false,
+                opacity: 1.0,
+                x,
+                y,
+                scale: 1.0,
+                rotation: 0.0,
+                blend_mode: "normal".to_string(),
+                effects: LayerEffects::default(),
+                outline: LayerOutline::default(),
+                kind: LayerKind::Text3D {
+                    content,
+                    font_style,
+                    color,
+                    depth,
+                    shadow_color: [0, 0, 0, 180],
+                    stroke_color: stroke,
+                    stroke_width: stroke_w,
+                    size,
+                },
+            });
+            render_and_respond(s)
+        }
+        "add_shape" => {
+            let shape_type = p["shape_type"].as_str().unwrap_or("rectangle").to_string();
+            let width = p["width"].as_u64().unwrap_or(300) as u32;
+            let height = p["height"].as_u64().unwrap_or(160) as u32;
+            let fill = parse_hex_color(p["fill_hex"].as_str().unwrap_or("#6366F1"));
+            let radius = p["border_radius"].as_u64().unwrap_or(16) as u32;
+            let x = p["x"].as_i64().unwrap_or(80);
+            let y = p["y"].as_i64().unwrap_or(80);
+            s.push_undo();
+            let id = s.next_id();
+            s.current.layers.push(Layer {
+                id,
+                name: format!("Shape: {}", shape_type),
+                visible: true,
+                locked: false,
+                opacity: 1.0,
+                x,
+                y,
+                scale: 1.0,
+                rotation: 0.0,
+                blend_mode: "normal".to_string(),
+                effects: LayerEffects::default(),
+                outline: LayerOutline::default(),
+                kind: LayerKind::Shape {
+                    shape_type,
+                    width: width.max(4),
+                    height: height.max(4),
+                    fill_color: fill,
+                    border_radius: radius,
+                },
+            });
+            render_and_respond(s)
+        }
+        "set_layer_outline" => {
+            let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
+            let enabled = p["enabled"].as_bool().unwrap_or(true);
+            let color = parse_hex_color(p["color_hex"].as_str().unwrap_or("#FFFFFF"));
+            let thickness = p["thickness"].as_u64().unwrap_or(6).min(24) as u32;
+            s.push_undo();
+            let layer = s
+                .current
+                .layers
+                .iter_mut()
+                .find(|l| l.id == lid)
+                .ok_or_else(|| format!("Layer '{}' not found", lid))?;
+            layer.outline = LayerOutline {
+                enabled,
+                color,
+                thickness,
+            };
+            render_and_respond(s)
+        }
+        "update_layer_transform" => {
+            let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
+            s.push_undo();
+            let layer = s
+                .current
+                .layers
+                .iter_mut()
+                .find(|l| l.id == lid)
+                .ok_or_else(|| format!("Layer '{}' not found", lid))?;
+            if let Some(x) = p["x"].as_i64() {
+                layer.x = x;
+            }
+            if let Some(y) = p["y"].as_i64() {
+                layer.y = y;
+            }
+            if let Some(sc) = p["scale"].as_f64() {
+                layer.scale = (sc as f32).clamp(0.05, 8.0);
+            }
+            if let Some(rot) = p["rotation"].as_f64() {
+                layer.rotation = rot as f32;
+            }
+            if let Some(op) = p["opacity"].as_f64() {
+                layer.opacity = (op as f32).clamp(0.0, 1.0);
+            }
+            if let Some(bm) = p["blend_mode"].as_str() {
+                layer.blend_mode = bm.to_string();
+            }
+            render_and_respond(s)
+        }
+        "update_layer_effects" => {
+            let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
+            s.push_undo();
+            let layer = s
+                .current
+                .layers
+                .iter_mut()
+                .find(|l| l.id == lid)
+                .ok_or_else(|| format!("Layer '{}' not found", lid))?;
+            if let Some(b) = p["brightness"].as_i64() {
+                layer.effects.brightness = b as i32;
+            }
+            if let Some(c) = p["contrast"].as_f64() {
+                layer.effects.contrast = c as f32;
+            }
+            if let Some(sat) = p["saturation"].as_f64() {
+                layer.effects.saturation = sat as f32;
+            }
+            if let Some(bl) = p["blur"].as_f64() {
+                layer.effects.blur = (bl as f32).max(0.0);
+            }
+            if let Some(f) = p["filter"].as_str() {
+                layer.effects.filter = f.to_string();
+            }
+            render_and_respond(s)
+        }
+        "reorder_layer" => {
+            let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
+            let new_idx = p["new_index"].as_u64().ok_or("Missing 'new_index'")? as usize;
+            let idx = s
+                .current
+                .layers
+                .iter()
+                .position(|l| l.id == lid)
+                .ok_or_else(|| format!("Layer '{}' not found", lid))?;
+            s.push_undo();
+            let layer = s.current.layers.remove(idx);
+            let target = new_idx.min(s.current.layers.len());
+            s.current.layers.insert(target, layer);
+            render_and_respond(s)
+        }
+        "delete_layer" => {
+            let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
+            let idx = s
+                .current
+                .layers
+                .iter()
+                .position(|l| l.id == lid)
+                .ok_or_else(|| format!("Layer '{}' not found", lid))?;
+            s.push_undo();
+            s.current.layers.remove(idx);
+            render_and_respond(s)
+        }
+        "undo" => {
+            if let Some(prev) = s.undo_stack.pop() {
+                let curr = std::mem::replace(&mut s.current, prev);
+                s.redo_stack.push(curr);
+            }
+            render_and_respond(s)
+        }
+        other => Err(format!("Unknown MCP tool '{}'", other)),
+    }
 }
 
-// ── MCP stdio server (runs when launched with --mcp flag by Claude Desktop) ─
+// ── MCP stdio Server (--mcp) ────────────────────────────────────────────────
 
 pub fn run_mcp_stdio() {
-    use std::io::{BufRead, Write};
-
-    let stdin     = std::io::stdin();
-    let stdout    = std::io::stdout();
-    let mut out   = stdout.lock();
-
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
     let tools_desc = build_tools_description();
 
     for line in stdin.lock().lines() {
-        let line = match line { Ok(l) => l, Err(_) => break };
-        if line.trim().is_empty() { continue; }
-
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
         let req: Value = match serde_json::from_str(&line) {
-            Ok(v)  => v,
+            Ok(v) => v,
             Err(e) => {
                 let r = json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":format!("Parse error: {}",e)}});
                 writeln!(out, "{}", r).ok();
+                out.flush().ok();
                 continue;
             }
         };
 
-        let id     = req.get("id").cloned().unwrap_or(json!(null));
+        let id = req.get("id").cloned().unwrap_or(json!(null));
         let method = req["method"].as_str().unwrap_or("");
         let params = req.get("params").cloned().unwrap_or(json!({}));
 
         let result: Option<Value> = match method {
             "initialize" => Some(json!({
                 "protocolVersion": "2024-11-05",
-                "capabilities":    { "tools": {} },
-                "serverInfo":      { "name": "veltrax-studios", "version": "0.1.0" }
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "veltrax-studios", "version": "0.1.0" }
             })),
-            "notifications/initialized" | "ping" => {
-                if method == "ping" { Some(json!({})) } else { continue; }
-            }
+            "notifications/initialized" => continue,
+            "ping" => Some(json!({})),
             "tools/list" => Some(tools_desc.clone()),
             "tools/call" => {
                 let tool_name = params["name"].as_str().unwrap_or("");
-                let args      = params.get("arguments").cloned().unwrap_or(json!({}));
+                let args = params.get("arguments").cloned().unwrap_or(json!({}));
                 Some(forward_tool_call(tool_name, &args))
             }
             _ => {
@@ -291,127 +462,192 @@ pub fn run_mcp_stdio() {
 }
 
 fn build_tools_description() -> Value {
-    json!({ "tools": [
-        {
-            "name": "inspect_canvas",
-            "description": "Get a visual preview (JPEG image) and pixel dimensions of the active canvas in Veltrax Studios. Call this first to see what you are working with.",
-            "inputSchema": { "type": "object", "properties": {}, "required": [] }
-        },
-        {
-            "name": "apply_filter",
-            "description": "Apply a visual filter to the current image.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "filter": { "type": "string", "enum": ["grayscale","invert","blur","noir","warm","cool"], "description": "Name of the filter to apply." }
-                },
-                "required": ["filter"]
-            }
-        },
-        {
-            "name": "adjust_image",
-            "description": "Adjust brightness, contrast and/or saturation. Values range from -100 to 100.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "brightness": { "type": "integer",  "minimum": -100, "maximum": 100 },
-                    "contrast":   { "type": "number",   "minimum": -100, "maximum": 100 },
-                    "saturation": { "type": "number",   "minimum": -100, "maximum": 100 }
+    json!({
+        "tools": [
+            {
+                "name": "inspect_project",
+                "description": "Inspect the active Veltrax Studios project: returns canvas dimensions, all layers with their IDs/positions, and a JPEG preview.",
+                "inputSchema": { "type": "object", "properties": {}, "required": [] }
+            },
+            {
+                "name": "add_image_overlay",
+                "description": "Add a local PNG/image file as a new overlay layer.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "image_path": { "type": "string" },
+                        "x": { "type": "integer" },
+                        "y": { "type": "integer" },
+                        "scale": { "type": "number" }
+                    },
+                    "required": ["image_path"]
                 }
+            },
+            {
+                "name": "remove_background_color",
+                "description": "Remove a solid background color from an Image layer to create clean transparency.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "layer_id": { "type": "string" },
+                        "target_hex": { "type": "string", "description": "Hex color e.g. #FFFFFF" },
+                        "tolerance": { "type": "integer", "minimum": 0, "maximum": 255 }
+                    },
+                    "required": ["layer_id", "target_hex"]
+                }
+            },
+            {
+                "name": "add_3d_text",
+                "description": "Add a high-impact 3D extruded text layer with stroke and shadow.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "content": { "type": "string" },
+                        "font_style": { "type": "string", "enum": ["modern_sans","classic_serif","tech_mono","bold_display","script"] },
+                        "size": { "type": "number" },
+                        "color_hex": { "type": "string" },
+                        "depth_3d": { "type": "integer", "minimum": 0, "maximum": 30 },
+                        "stroke_hex": { "type": "string" },
+                        "stroke_width": { "type": "integer", "minimum": 0, "maximum": 10 },
+                        "x": { "type": "integer" },
+                        "y": { "type": "integer" }
+                    },
+                    "required": ["content"]
+                }
+            },
+            {
+                "name": "add_shape",
+                "description": "Add a geometric shape layer (rectangle, circle, or badge).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "shape_type": { "type": "string", "enum": ["rectangle","circle","badge"] },
+                        "width": { "type": "integer", "minimum": 4 },
+                        "height": { "type": "integer", "minimum": 4 },
+                        "fill_hex": { "type": "string" },
+                        "border_radius": { "type": "integer", "minimum": 0 },
+                        "x": { "type": "integer" },
+                        "y": { "type": "integer" }
+                    },
+                    "required": ["shape_type"]
+                }
+            },
+            {
+                "name": "set_layer_outline",
+                "description": "Add or remove a glowing/solid outer border around any layer.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "layer_id": { "type": "string" },
+                        "enabled": { "type": "boolean" },
+                        "color_hex": { "type": "string" },
+                        "thickness": { "type": "integer", "minimum": 1, "maximum": 24 }
+                    },
+                    "required": ["layer_id", "enabled"]
+                }
+            },
+            {
+                "name": "update_layer_transform",
+                "description": "Update position, scale, rotation, opacity, or blend mode of a layer.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "layer_id": { "type": "string" },
+                        "x": { "type": "integer" },
+                        "y": { "type": "integer" },
+                        "scale": { "type": "number" },
+                        "rotation": { "type": "number" },
+                        "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+                        "blend_mode": { "type": "string", "enum": ["normal","multiply","screen","overlay"] }
+                    },
+                    "required": ["layer_id"]
+                }
+            },
+            {
+                "name": "update_layer_effects",
+                "description": "Update non-destructive adjustments and filter for a layer. Use filter='original' to clear filters.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "layer_id": { "type": "string" },
+                        "brightness": { "type": "integer", "minimum": -100, "maximum": 100 },
+                        "contrast": { "type": "number", "minimum": -100, "maximum": 100 },
+                        "saturation": { "type": "number", "minimum": -100, "maximum": 100 },
+                        "blur": { "type": "number", "minimum": 0, "maximum": 20 },
+                        "filter": { "type": "string", "enum": ["original","grayscale","noir","warm","cool","invert"] }
+                    },
+                    "required": ["layer_id"]
+                }
+            },
+            {
+                "name": "reorder_layer",
+                "description": "Move a layer to a new z-order index (0 = bottom).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "layer_id": { "type": "string" },
+                        "new_index": { "type": "integer", "minimum": 0 }
+                    },
+                    "required": ["layer_id", "new_index"]
+                }
+            },
+            {
+                "name": "delete_layer",
+                "description": "Delete a layer by its ID.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "layer_id": { "type": "string" } },
+                    "required": ["layer_id"]
+                }
+            },
+            {
+                "name": "undo",
+                "description": "Undo the last layer action in Veltrax Studios.",
+                "inputSchema": { "type": "object", "properties": {}, "required": [] }
             }
-        },
-        {
-            "name": "transform_image",
-            "description": "Rotate or flip the current image.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string", "enum": ["rotate90","rotate180","flip_h","flip_v"] }
-                },
-                "required": ["action"]
-            }
-        },
-        {
-            "name": "crop_image",
-            "description": "Crop the image to a rectangular region (pixel coordinates).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "x":      { "type": "integer", "minimum": 0 },
-                    "y":      { "type": "integer", "minimum": 0 },
-                    "width":  { "type": "integer", "minimum": 1 },
-                    "height": { "type": "integer", "minimum": 1 }
-                },
-                "required": ["x","y","width","height"]
-            }
-        },
-        {
-            "name": "resize_image",
-            "description": "Resize the image to exact pixel dimensions using Lanczos3 resampling.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "new_width":  { "type": "integer", "minimum": 1 },
-                    "new_height": { "type": "integer", "minimum": 1 }
-                },
-                "required": ["new_width","new_height"]
-            }
-        }
-    ]})
+        ]
+    })
 }
 
 fn forward_tool_call(tool_name: &str, args: &Value) -> Value {
-    let (url, body) = match tool_name {
-        "inspect_canvas" => (
-            "http://127.0.0.1:3847/tool/inspect".to_string(),
-            json!({}),
-        ),
-        "apply_filter" => (
-            "http://127.0.0.1:3847/tool/execute".to_string(),
-            json!({ "tool": "apply_filter", "filter": args["filter"] }),
-        ),
-        "adjust_image" => (
-            "http://127.0.0.1:3847/tool/execute".to_string(),
-            json!({ "tool": "adjust", "brightness": args.get("brightness").cloned().unwrap_or(json!(0)), "contrast": args.get("contrast").cloned().unwrap_or(json!(0)), "saturation": args.get("saturation").cloned().unwrap_or(json!(0)) }),
-        ),
-        "transform_image" => (
-            "http://127.0.0.1:3847/tool/execute".to_string(),
-            json!({ "tool": "transform", "action": args["action"] }),
-        ),
-        "crop_image" => (
-            "http://127.0.0.1:3847/tool/execute".to_string(),
-            json!({ "tool": "crop", "x": args["x"], "y": args["y"], "width": args["width"], "height": args["height"] }),
-        ),
-        "resize_image" => (
-            "http://127.0.0.1:3847/tool/execute".to_string(),
-            json!({ "tool": "resize", "new_width": args["new_width"], "new_height": args["new_height"] }),
-        ),
-        other => return mcp_err(&format!("Unknown tool: '{}'", other)),
+    let (url, body) = if tool_name == "inspect_project" {
+        ("http://127.0.0.1:3847/tool/inspect", json!({}))
+    } else {
+        let mut payload = args.clone();
+        payload["tool"] = json!(tool_name);
+        ("http://127.0.0.1:3847/tool/execute", payload)
     };
 
-    let resp = match ureq::post(&url).send_json(&body) {
-        Ok(r)  => match r.into_json::<Value>() { Ok(v) => v, Err(e) => return mcp_err(&e.to_string()) },
-        Err(e) => return mcp_err(&format!("Could not reach Veltrax Studios GUI (is it running?): {}", e)),
+    let resp = match ureq::post(url).send_json(&body) {
+        Ok(r) => match r.into_json::<Value>() {
+            Ok(v) => v,
+            Err(e) => return mcp_err(&e.to_string()),
+        },
+        Err(e) => {
+            return mcp_err(&format!(
+                "Could not reach Veltrax Studios GUI (is it running?): {}",
+                e
+            ))
+        }
     };
 
     if let Some(err_msg) = resp.get("error").and_then(|e| e.as_str()) {
-        let detail = resp.get("message").and_then(|m| m.as_str()).unwrap_or(err_msg);
+        let detail = resp
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or(err_msg);
         return json!({ "content": [{ "type": "text", "text": detail }], "isError": true });
     }
 
-    let w = resp["width"].as_u64().unwrap_or(0);
-    let h = resp["height"].as_u64().unwrap_or(0);
-    let desc = if w > 0 {
-        format!("Done — canvas is now {} × {} px.", w, h)
-    } else {
-        format!("'{}' completed successfully.", tool_name)
-    };
+    let cw = resp["canvas_width"].as_u64().unwrap_or(0);
+    let ch = resp["canvas_height"].as_u64().unwrap_or(0);
+    let layers = serde_json::to_string_pretty(&resp["layers"]).unwrap_or_else(|_| "[]".into());
+    let summary = format!("Canvas: {} × {} px\nLayers:\n{}", cw, ch, layers);
 
-    let mut content = vec![json!({ "type": "text", "text": desc })];
+    let mut content = vec![json!({ "type": "text", "text": summary })];
     if let Some(b64) = resp["image_base64"].as_str() {
         content.push(json!({ "type": "image", "data": b64, "mimeType": "image/jpeg" }));
     }
-
     json!({ "content": content })
 }
 

@@ -1,13 +1,14 @@
 <script>
   import {
     Plus, Paintbrush2, Home, Bot,
-    FolderOpen, Youtube, Instagram, Smartphone, LayoutGrid, Plug
+    FolderOpen, Youtube, Instagram, Smartphone, LayoutGrid, Plug, Layers
   } from 'lucide-svelte';
   import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 
   let {
     recentProjects = [],
-    mcpIsActive    = false,
+    mcpIsActive = false,
+    hasProject = false,
     onGoToEditor,
     onShowModal,
     onOpenFile,
@@ -15,22 +16,23 @@
     onCreatePreset
   } = $props();
 
-  let subView       = $state('home'); // 'home' | 'mcp'
+  let subView = $state('home'); // 'home' | 'mcp'
   let connectResult = $state('');
 
   const quickPresets = [
-    { label: 'Open Image',  sub: null,          icon: FolderOpen, action: 'open' },
-    { label: 'YouTube',     sub: '1280 × 720',  icon: Youtube,    action: 'preset', w: 1280, h: 720,  name: 'YouTube Thumbnail' },
-    { label: 'Instagram',   sub: '1080 × 1080', icon: Instagram,  action: 'preset', w: 1080, h: 1080, name: 'Instagram Post' },
-    { label: 'Story',       sub: '1080 × 1920', icon: Smartphone, action: 'preset', w: 1080, h: 1920, name: 'Story' },
-    { label: 'Custom Size', sub: null,          icon: LayoutGrid, action: 'modal' },
+    { label: 'Open Image', sub: null, icon: FolderOpen, action: 'open' },
+    { label: 'Logo PNG', sub: '1024 × 1024', icon: Layers, action: 'preset', w: 1024, h: 1024, name: 'Transparent Logo', transparent: true },
+    { label: 'YouTube', sub: '1280 × 720', icon: Youtube, action: 'preset', w: 1280, h: 720, name: 'YouTube Thumbnail', transparent: false },
+    { label: 'Instagram', sub: '1080 × 1080', icon: Instagram, action: 'preset', w: 1080, h: 1080, name: 'Instagram Post', transparent: false },
+    { label: 'Story', sub: '1080 × 1920', icon: Smartphone, action: 'preset', w: 1080, h: 1920, name: 'Story', transparent: false },
+    { label: 'Custom Size', sub: null, icon: LayoutGrid, action: 'modal' },
   ];
 
   function handleQuick(item) {
-    if (item.action === 'open')        onOpenFile();
-    else if (item.action === 'modal')  onShowModal();
+    if (item.action === 'open') onOpenFile();
+    else if (item.action === 'modal') onShowModal();
     else if (item.action === 'preset' && onCreatePreset) {
-      onCreatePreset(item.w, item.h, item.name);
+      onCreatePreset(item.w, item.h, item.name, Boolean(item.transparent));
     }
   }
 
@@ -44,7 +46,6 @@
 </script>
 
 <div class="dashboard-shell">
-  <!-- ── Global Left Sidebar (72px) ─────────────────────────── -->
   <aside class="g-sidebar">
     <div class="sidebar-logo" title="Veltrax Studios by Crafters Apex">
       <div class="logo-mark">V</div>
@@ -56,7 +57,7 @@
         <span class="g-nav-label">Create</span>
       </button>
 
-      <button class="g-nav-btn" onclick={onGoToEditor} title="Open Editor">
+      <button class="g-nav-btn" onclick={onGoToEditor} title={hasProject ? 'Return to Editor' : 'Open Editor'}>
         <span class="g-nav-icon"><Paintbrush2 size={19} strokeWidth={1.75} /></span>
         <span class="g-nav-label">Editor</span>
       </button>
@@ -83,17 +84,16 @@
     </nav>
 
     <div class="sidebar-footer">
-      <div class="engine-dot" title="Rust engine online"></div>
+      <div class="engine-dot" title="Rust layer engine online"></div>
     </div>
   </aside>
 
-  <!-- ── Main Area ───────────────────────────────────────────── -->
   <main class="d-main">
     {#if subView === 'home'}
       <div class="d-scroll">
         <section class="hero">
           <h1 class="hero-title">What will you create today?</h1>
-          <p class="hero-sub">Open an image or start from a preset — Veltrax Studios' Rust engine is ready.</p>
+          <p class="hero-sub">Build YouTube thumbnails, transparent PNG logos, and layered edits in Veltrax Studios.</p>
 
           <div class="quick-row">
             {#each quickPresets as item}
@@ -125,7 +125,11 @@
               {#each recentProjects as item}
                 <button class="r-card" onclick={() => onLoadRecent(item.path)}>
                   <div class="r-thumb">
-                    <img src={`${convertFileSrc(item.path)}?v=1`} alt={item.name} loading="lazy" />
+                    {#if !item.path.toLowerCase().endsWith('.veltrax')}
+                      <img src={`${convertFileSrc(item.path)}?v=1`} alt={item.name} loading="lazy" />
+                    {:else}
+                      <Layers size={28} strokeWidth={1.5} />
+                    {/if}
                   </div>
                   <div class="r-meta">
                     <span class="r-name">{item.name}</span>
@@ -141,8 +145,8 @@
           <section class="empty-state">
             <div class="empty-icon"><FolderOpen size={36} strokeWidth={1.25} /></div>
             <h3>No recent projects yet</h3>
-            <p>Open an image or create a new canvas to get started.</p>
-            <button class="btn-primary" onclick={onOpenFile}>Open Image</button>
+            <p>Open an image, load a .veltrax project, or create a transparent canvas.</p>
+            <button class="btn-primary" onclick={onOpenFile}>Open Image / Project</button>
           </section>
         {/if}
       </div>
@@ -153,8 +157,8 @@
           <div class="mcp-badge">Model Context Protocol</div>
           <h2>Connect AI (MCP)</h2>
           <p>
-            Connect Veltrax Studios' Rust image engine directly to <strong>Claude Desktop</strong>.
-            Once connected, Claude can inspect your active canvas and apply edits in real time.
+            Connect Veltrax Studios' non-destructive Rust layer engine directly to <strong>Claude Desktop</strong>.
+            Claude can inspect your layers, add 3D text, remove backgrounds, apply outlines, and compose thumbnails.
           </p>
 
           <div class="mcp-status">
@@ -163,7 +167,7 @@
               {#if mcpIsActive}
                 <strong style="color:var(--text-primary)">Active &amp; Ready</strong>
               {:else}
-                Standby — Open an image in the Editor to enable AI
+                Standby — Open or create a project in the Editor to enable AI
               {/if}
             </span>
           </div>
@@ -171,12 +175,17 @@
           <div class="mcp-commands">
             <h3>Exposed MCP tools</h3>
             <ul>
-              <li><code>inspect_canvas</code></li>
-              <li><code>adjust_image</code></li>
-              <li><code>apply_filter</code></li>
-              <li><code>transform_image</code></li>
-              <li><code>crop_image</code></li>
-              <li><code>resize_image</code></li>
+              <li><code>inspect_project</code></li>
+              <li><code>add_image_overlay</code></li>
+              <li><code>remove_background_color</code></li>
+              <li><code>add_3d_text</code></li>
+              <li><code>add_shape</code></li>
+              <li><code>set_layer_outline</code></li>
+              <li><code>update_layer_transform</code></li>
+              <li><code>update_layer_effects</code></li>
+              <li><code>reorder_layer</code></li>
+              <li><code>delete_layer</code></li>
+              <li><code>undo</code></li>
             </ul>
           </div>
 
@@ -237,7 +246,7 @@
   .quick-btn {
     display:flex; flex-direction:column; align-items:center; gap:8px;
     background:var(--bg-card); border:1px solid var(--border); border-radius:var(--r-xl);
-    padding:20px 18px 14px; min-width:100px; color:var(--text-secondary);
+    padding:20px 18px 14px; min-width:104px; color:var(--text-secondary);
   }
   .quick-btn:hover:not(:disabled) { background:var(--bg-card-hover); border-color:var(--border-active); color:var(--text-primary); box-shadow:0 6px 20px rgba(0,0,0,0.3); }
   .quick-icon { width:48px; height:48px; border-radius:50%; background:var(--bg-elevated); display:grid; place-items:center; }
@@ -252,7 +261,7 @@
   .recent-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:14px; }
   .r-card { display:flex; flex-direction:column; background:var(--bg-card); border:1px solid var(--border); border-radius:var(--r-md); overflow:hidden; color:var(--text-primary); text-align:left; }
   .r-card:hover:not(:disabled) { border-color:var(--border-active); box-shadow:0 8px 24px rgba(0,0,0,0.3); }
-  .r-thumb { aspect-ratio:16/10; background:var(--bg-elevated); overflow:hidden; display:flex; align-items:center; justify-content:center; }
+  .r-thumb { aspect-ratio:16/10; background:var(--bg-elevated); overflow:hidden; display:flex; align-items:center; justify-content:center; color:var(--text-muted); }
   .r-thumb img { width:100%; height:100%; object-fit:cover; display:block; }
   .r-meta { padding:10px 12px; display:flex; flex-direction:column; gap:3px; }
   .r-name { font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -261,10 +270,10 @@
   .empty-state { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:80px 24px; color:var(--text-secondary); text-align:center; flex:1; }
   .empty-icon { opacity:0.3; }
   .empty-state h3 { font-size:17px; color:var(--text-primary); }
-  .empty-state p { font-size:13px; max-width:300px; }
+  .empty-state p { font-size:13px; max-width:340px; }
 
   .mcp-view { flex:1; padding:40px 48px; display:flex; align-items:flex-start; overflow-y:auto; }
-  .mcp-card { max-width:580px; display:flex; flex-direction:column; gap:20px; }
+  .mcp-card { max-width:600px; display:flex; flex-direction:column; gap:20px; }
   .mcp-badge { display:inline-block; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color:#a5b4fc; background:var(--accent-subtle); border:1px solid var(--border-active); padding:5px 10px; border-radius:999px; width:fit-content; }
   .mcp-card h2 { font-size:24px; font-weight:700; }
   .mcp-card p { font-size:14px; color:var(--text-secondary); line-height:1.65; }

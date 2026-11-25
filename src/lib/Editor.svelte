@@ -1,143 +1,177 @@
 <script>
   import { invoke, convertFileSrc } from '@tauri-apps/api/core';
-  import { listen } from '@tauri-apps/api/event';
+  import { open, save } from '@tauri-apps/plugin-dialog';
   import {
-    ArrowLeft, Download, Undo2, Redo2, FolderOpen,
-    SlidersHorizontal, Sparkles, RotateCcw, ImageIcon, Bot, Type,
-    ChevronLeft, ChevronRight, Columns2, Crop, Maximize2,
-    RotateCw, FlipHorizontal, FlipVertical, RefreshCcw, Plug
+    ArrowLeft, Download, Undo2, Redo2, Save,
+    Layers, Shapes, Type, SlidersHorizontal, Sparkles, Bot,
+    ChevronLeft, ChevronRight, Maximize2, Eye, EyeOff,
+    Lock, Unlock, Copy, Trash2, ArrowUp, ArrowDown,
+    ImagePlus, Eraser, Plug, AlignCenterHorizontal, AlignCenterVertical
   } from 'lucide-svelte';
   import ExportModal from './ExportModal.svelte';
 
   let {
-    history       = [],
-    historyIndex  = -1,
-    currentPath   = null,
-    canUndo       = false,
-    canRedo       = false,
-    imgWidth      = 0,
-    imgHeight     = 0,
-    projectName   = 'Untitled Design',
-    mcpIsActive   = false,
-    makeTempPath,
-    onUndo,
-    onRedo,
-    onPushHistory,
+    project = null,
+    cacheBuster = 0,
+    mcpIsActive = false,
+    onProjectUpdate,
     onGoHome,
-    onProjectNameChange,
   } = $props();
 
-  // ── Editor state ───────────────────────────────────────────────────────
-  let activeTool        = $state(null);
-  let drawerOpen        = $state(false);
-  let isProcessing      = $state(false);
-  let statusMsg         = $state('Ready');
-  let errorMsg          = $state('');
-  let comparing         = $state(false);
-  let cacheBuster       = $state(0);
-  let zoom              = $state(1.0);
-  let showExportModal   = $state(false);
+  // ── UI State ─────────────────────────────────────────────────────────────
+  let activeTool = $state('layers');
+  let drawerOpen = $state(true);
+  let selectedLayerId = $state(null);
+  let isProcessing = $state(false);
+  let statusMsg = $state('Ready');
+  let errorMsg = $state('');
+  let showExportModal = $state(false);
+  let zoom = $state(1.0);
   let canvasArea;
 
-  // ── Filter: non-destructive base tracking ──────────────────────────────
-  // filterBasePath is the image state *before* the current filter session.
-  // All filter applications use this as source so filters don't stack.
-  let filterBasePath    = $state(null);
+  // ── Derived Project Fields ───────────────────────────────────────────────
+  let hasProject = $derived(Boolean(project && project.preview_path));
+  let layers = $derived(project?.layers ?? []);
+  let canvasW = $derived(project?.canvas_width ?? 1280);
+  let canvasH = $derived(project?.canvas_height ?? 720);
+  let transparentBg = $derived(project?.transparent_bg ?? false);
+  let previewUrl = $derived(
+    project?.preview_path ? `${convertFileSrc(project.preview_path)}?v=${cacheBuster}` : ''
+  );
+  let selectedLayer = $derived(layers.find((l) => l.id === selectedLayerId) ?? null);
+  let zoomPct = $derived(Math.round(zoom * 100));
 
-  // ── Adjust sliders ──────────────────────────────────────────────────────
-  let brightness = $state(0), contrast = $state(0), saturation = $state(0);
+  // Auto-select top layer when layers change and current selection disappears
+  $effect(() => {
+    if (layers.length > 0 && (!selectedLayerId || !layers.some((l) => l.id === selectedLayerId))) {
+      selectedLayerId = layers[layers.length - 1].id;
+    } else if (layers.length === 0) {
+      selectedLayerId = null;
+    }
+  });
 
-  // ── Transform / resize / crop inputs ──────────────────────────────────
-  let cropX = $state(0), cropY = $state(0), cropW = $state(400), cropH = $state(400);
-  let resW  = $state(800), resH = $state(600);
+  // ── Tool Inputs Synced with Selected Layer ───────────────────────────────
+  let layerX = $state(0);
+  let layerY = $state(0);
+  let layerScale = $state(1.0);
+  let layerRot = $state(0);
+  let layerOpacity = $state(1.0);
+  let layerBlend = $state('normal');
 
-  // ── Text tool state ────────────────────────────────────────────────────
-  let textContent  = $state('Your text here');
-  let fontStyle    = $state('modern_sans');
-  let fontSize     = $state(48);
-  let textColorHex = $state('#FFFFFF');
-  let textX        = $state(40);
-  let textY        = $state(80);
+  let fxBrightness = $state(0);
+  let fxContrast = $state(0);
+  let fxSaturation = $state(0);
+  let fxBlur = $state(0);
+  let fxFilter = $state('original');
+
+  let outEnabled = $state(false);
+  let outColor = $state('#FFFFFF');
+  let outThickness = $state(6);
+
+  $effect(() => {
+    if (selectedLayer) {
+      layerX = selectedLayer.x;
+      layerY = selectedLayer.y;
+      layerScale = selectedLayer.scale;
+      layerRot = selectedLayer.rotation;
+      layerOpacity = selectedLayer.opacity;
+      layerBlend = selectedLayer.blend_mode;
+      fxBrightness = selectedLayer.effects.brightness;
+      fxContrast = selectedLayer.effects.contrast;
+      fxSaturation = selectedLayer.effects.saturation;
+      fxBlur = selectedLayer.effects.blur;
+      fxFilter = selectedLayer.effects.filter;
+      outEnabled = selectedLayer.outline.enabled;
+      outThickness = selectedLayer.outline.thickness;
+      const [r, g, b] = selectedLayer.outline.color;
+      outColor = `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+    }
+  });
+
+  // ── Text & Shape & BG Removal Inputs ─────────────────────────────────────
+  let textContent = $state('VELTRAX');
+  let fontStyle = $state('bold_display');
+  let fontSize = $state(96);
+  let textColor = $state('#FFFFFF');
+  let textDepth = $state(8);
+  let strokeColor = $state('#000000');
+  let strokeWidth = $state(3);
+  let textX = $state(80);
+  let textY = $state(80);
+
+  let shapeColor = $state('#6366F1');
+  let bgTargetHex = $state('#FFFFFF');
+  let bgTolerance = $state(35);
+  let connectResult = $state('');
+
+  // ── Drag-to-move layer on canvas ─────────────────────────────────────────
+  let isDragging = $state(false);
+  let dragStartMouse = { x: 0, y: 0 };
+  let dragStartLayer = { x: 0, y: 0 };
+
+  function onCanvasMouseDown(e) {
+    if (!selectedLayer || selectedLayer.locked || isProcessing) return;
+    isDragging = true;
+    dragStartMouse = { x: e.clientX, y: e.clientY };
+    dragStartLayer = { x: selectedLayer.x, y: selectedLayer.y };
+  }
+  function onCanvasMouseMove(e) {
+    if (!isDragging) return;
+    layerX = Math.round(dragStartLayer.x + (e.clientX - dragStartMouse.x) / zoom);
+    layerY = Math.round(dragStartLayer.y + (e.clientY - dragStartMouse.y) / zoom);
+  }
+  function onCanvasMouseUp() {
+    if (!isDragging) return;
+    isDragging = false;
+    if (selectedLayer && (layerX !== selectedLayer.x || layerY !== selectedLayer.y)) {
+      commitTransform();
+    }
+  }
+
+  // ── Rail & Presets ───────────────────────────────────────────────────────
+  const tools = [
+    { id: 'layers', label: 'Layers', Icon: Layers },
+    { id: 'elements', label: 'Elements', Icon: Shapes },
+    { id: 'text', label: 'Text & 3D', Icon: Type },
+    { id: 'adjust', label: 'Adjust', Icon: SlidersHorizontal },
+    { id: 'outline', label: 'Outline', Icon: Sparkles },
+    { id: 'mcp', label: 'MCP AI', Icon: Bot },
+  ];
 
   const fontStyles = [
-    { id: 'modern_sans',   label: 'Modern Sans',   sample: 'Aa' },
-    { id: 'classic_serif', label: 'Classic Serif',  sample: 'Aa' },
-    { id: 'tech_mono',     label: 'Tech Mono',      sample: 'Aa' },
-    { id: 'bold_display',  label: 'Bold Display',   sample: 'Aa' },
-    { id: 'script',        label: 'Script',          sample: 'Aa' },
-  ];
-  const quickColors = ['#FFFFFF','#000000','#EF4444','#F97316','#6366F1','#10B981'];
-
-  // ── Derived ────────────────────────────────────────────────────────────
-  let previewUrl = $derived(
-    currentPath
-      ? (comparing && history.length > 0
-          ? `${convertFileSrc(history[0])}?v=orig`
-          : `${convertFileSrc(currentPath)}?v=${cacheBuster}`)
-      : ''
-  );
-  let stepLabel  = $derived(`Step ${historyIndex + 1} / ${history.length}`);
-  let zoomPct    = $derived(Math.round(zoom * 100));
-  let hasImage   = $derived(Boolean(currentPath));
-
-  const tools = [
-    { id: 'adjust',    label: 'Adjust',    Icon: SlidersHorizontal },
-    { id: 'filters',   label: 'Filters',   Icon: Sparkles          },
-    { id: 'transform', label: 'Transform', Icon: RotateCcw         },
-    { id: 'text',      label: 'Text',      Icon: Type              },
-    { id: 'image',     label: 'Image',     Icon: ImageIcon         },
-    { id: 'mcp',       label: 'MCP AI',    Icon: Bot               },
+    { id: 'bold_display', label: 'Bold Display' },
+    { id: 'modern_sans', label: 'Modern Sans' },
+    { id: 'classic_serif', label: 'Classic Serif' },
+    { id: 'tech_mono', label: 'Tech Mono' },
+    { id: 'script', label: 'Script' },
   ];
 
   const filters = [
+    { id: 'original', label: 'Original', style: 'background:conic-gradient(from 90deg,#6366f1,#ec4899,#f97316,#6366f1);' },
     { id: 'grayscale', label: 'Grayscale', style: 'background:linear-gradient(135deg,#555,#aaa);' },
-    { id: 'noir',      label: 'Noir',      style: 'background:linear-gradient(135deg,#111,#444);' },
-    { id: 'warm',      label: 'Warm',      style: 'background:linear-gradient(135deg,#b45309,#f97316);' },
-    { id: 'cool',      label: 'Cool',      style: 'background:linear-gradient(135deg,#1d4ed8,#38bdf8);' },
-    { id: 'blur',      label: 'Blur',      style: 'background:linear-gradient(135deg,#4f46e5,#818cf8);filter:blur(3px);' },
-    { id: 'invert',    label: 'Invert',    style: 'background:linear-gradient(135deg,#e0f2fe,#1e1b4b);' },
+    { id: 'noir', label: 'Noir', style: 'background:linear-gradient(135deg,#111,#444);' },
+    { id: 'warm', label: 'Warm', style: 'background:linear-gradient(135deg,#b45309,#f97316);' },
+    { id: 'cool', label: 'Cool', style: 'background:linear-gradient(135deg,#1d4ed8,#38bdf8);' },
+    { id: 'invert', label: 'Invert', style: 'background:linear-gradient(135deg,#e0f2fe,#1e1b4b);' },
   ];
 
-  // ── MCP event listener — Rust notifies Svelte after remote edit ────────
-  $effect(() => {
-    const unlisten = listen('mcp-image-updated', (event) => {
-      const newPath = event.payload;
-      onPushHistory(newPath, null, null);
-      filterBasePath = null; // reset filter base after MCP edit
-      cacheBuster += 1;
-      statusMsg = 'Canvas updated via MCP';
-    });
-    return () => { unlisten.then(fn => fn()); };
-  });
+  const quickColors = ['#FFFFFF', '#000000', '#EF4444', '#F97316', '#EAB308', '#10B981', '#6366F1'];
 
-  // ── Keyboard shortcuts ─────────────────────────────────────────────────
-  function handleKeydown(e) {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); onUndo(); filterBasePath = null; }
-    if ((e.ctrlKey || e.metaKey) && e.key === 'y') { e.preventDefault(); onRedo(); filterBasePath = null; }
-    if (e.key === 'Escape') { drawerOpen = false; showExportModal = false; }
-  }
-
-  // ── Tool rail selection ────────────────────────────────────────────────
+  // ── Helpers ──────────────────────────────────────────────────────────────
   function selectTool(id) {
-    if (activeTool === id) { drawerOpen = !drawerOpen; }
-    else { activeTool = id; drawerOpen = true; }
+    if (activeTool === id) drawerOpen = !drawerOpen;
+    else {
+      activeTool = id;
+      drawerOpen = true;
+    }
   }
 
-  // ── Canvas helpers ─────────────────────────────────────────────────────
-  function onImageLoad(e) {
-    resW = imgWidth  || e.currentTarget.naturalWidth;
-    resH = imgHeight || e.currentTarget.naturalHeight;
-    cropW = Math.max(1, Math.floor((imgWidth  || e.currentTarget.naturalWidth)  / 2));
-    cropH = Math.max(1, Math.floor((imgHeight || e.currentTarget.naturalHeight) / 2));
-    textX = 40;
-    textY = Math.max(1, Math.round((imgHeight || e.currentTarget.naturalHeight) * 0.1));
-    fitToScreen();
-  }
   function fitToScreen() {
-    if (!canvasArea || !imgWidth || !imgHeight) return;
+    if (!canvasArea || !canvasW || !canvasH) return;
     const { clientWidth: cw, clientHeight: ch } = canvasArea;
-    zoom = Math.max(0.05, Math.min((cw - 80) / imgWidth, (ch - 80) / imgHeight, 3));
+    zoom = Math.max(0.05, Math.min((cw - 80) / canvasW, (ch - 80) / canvasH, 3));
   }
+
   function wheelZoom(node) {
     const h = (e) => {
       e.preventDefault();
@@ -147,115 +181,182 @@
     return { destroy: () => node.removeEventListener('wheel', h) };
   }
 
-  // ── Generic command runner ─────────────────────────────────────────────
-  async function runCmd(commandName, buildArgs, label, w, h) {
-    if (!currentPath || isProcessing) return;
-    isProcessing = true; errorMsg = ''; statusMsg = `${label}…`;
+  async function runCmd(cmd, args, label) {
+    if (isProcessing) return;
+    isProcessing = true;
+    errorMsg = '';
+    statusMsg = `${label}…`;
     try {
-      const dest = await makeTempPath(currentPath);
-      const result = await invoke(commandName, buildArgs(currentPath, dest));
-      onPushHistory(result, w, h);
-      cacheBuster += 1;
-      statusMsg = `${label} applied`;
+      const resp = await invoke(cmd, args);
+      onProjectUpdate(resp);
+      statusMsg = `${label} done`;
+      return resp;
     } catch (e) {
-      errorMsg  = String(e);
+      errorMsg = String(e);
       statusMsg = `${label} failed`;
-    } finally { isProcessing = false; }
+    } finally {
+      isProcessing = false;
+    }
   }
 
-  // ── Filter commands (non-destructive: always from base) ────────────────
-  async function handleFilterClick(filterId, label) {
-    if (!hasImage || isProcessing) return;
-    // Save base on first filter of this session
-    if (!filterBasePath) filterBasePath = currentPath;
-    const source = filterBasePath;
-    isProcessing = true; errorMsg = ''; statusMsg = `${label}…`;
-    try {
-      const dest   = await makeTempPath(source);
-      const result = await invoke('apply_filter', { sourcePath: source, destPath: dest, filter: filterId });
-      onPushHistory(result);
-      cacheBuster += 1;
-      statusMsg = `${label} applied`;
-    } catch (e) {
-      errorMsg  = String(e);
-      statusMsg = `${label} failed`;
-    } finally { isProcessing = false; }
+  // ── Actions ──────────────────────────────────────────────────────────────
+  function handleKeydown(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+      e.preventDefault();
+      if (project?.can_undo) runCmd('undo_action', {}, 'Undo');
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
+      e.preventDefault();
+      if (project?.can_redo) runCmd('redo_action', {}, 'Redo');
+    }
+    if (e.key === 'Escape') showExportModal = false;
   }
 
-  function handleOriginalFilter() {
-    if (!filterBasePath || !hasImage) return;
-    // Push the saved base as a new history entry to restore clean state
-    onPushHistory(filterBasePath);
-    cacheBuster += 1;
-    filterBasePath = null;
-    statusMsg = 'Restored original';
+  async function saveVeltraxProject() {
+    if (!hasProject) return;
+    const dest = await save({
+      title: 'Save Veltrax Project',
+      defaultPath: `${project.project_name || 'project'}.veltrax`,
+      filters: [{ name: 'Veltrax Project', extensions: ['veltrax'] }],
+    });
+    if (dest) {
+      await invoke('save_project_file', { destPath: dest });
+      statusMsg = 'Project saved';
+    }
   }
 
-  // ── Adjust ─────────────────────────────────────────────────────────────
-  function applyAdjust() {
-    filterBasePath = null; // non-filter edit resets filter session
-    runCmd(
-      'adjust_brightness_contrast_saturation',
-      (s, d) => ({ sourcePath: s, destPath: d, brightness: Number(brightness), contrast: Number(contrast), saturation: Number(saturation) }),
-      'Adjust'
-    ).then(() => { brightness = 0; contrast = 0; saturation = 0; });
-  }
-  function resetAdjust() { brightness = 0; contrast = 0; saturation = 0; }
-
-  // ── Transform ──────────────────────────────────────────────────────────
-  function applyTransform(action, label) {
-    filterBasePath = null;
-    runCmd('transform_image', (s,d) => ({ sourcePath:s, destPath:d, action }), label);
-  }
-  function applyCrop() {
-    filterBasePath = null;
-    runCmd('crop_image', (s,d) => ({ sourcePath:s, destPath:d, x:Number(cropX), y:Number(cropY), width:Math.max(1,Number(cropW)), height:Math.max(1,Number(cropH)) }), 'Crop');
-  }
-  function applyResize() {
-    filterBasePath = null;
-    const nw = Math.max(1, Number(resW)), nh = Math.max(1, Number(resH));
-    runCmd('resize_image', (s,d) => ({ sourcePath:s, destPath:d, newWidth:nw, newHeight:nh }), 'Resize', nw, nh);
+  async function addOverlayImage() {
+    const sel = await open({
+      multiple: false,
+      title: 'Add Image / Icon Overlay',
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] }],
+    });
+    if (typeof sel === 'string' && sel) {
+      const resp = await runCmd('add_image_overlay_layer', { imagePath: sel, x: 40, y: 40, scale: 1.0 }, 'Add Overlay');
+      if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
+    }
   }
 
-  // ── Text ───────────────────────────────────────────────────────────────
-  function applyText() {
-    filterBasePath = null;
-    runCmd(
+  async function addShape(shapeType) {
+    const resp = await runCmd(
+      'add_shape_layer',
+      {
+        shapeType,
+        width: shapeType === 'badge' ? 320 : 240,
+        height: shapeType === 'badge' ? 90 : 240,
+        fillHex: shapeColor,
+        borderRadius: shapeType === 'rectangle' ? 20 : 0,
+        x: Math.round(canvasW / 2 - 120),
+        y: Math.round(canvasH / 2 - 120),
+      },
+      `Add ${shapeType}`
+    );
+    if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
+  }
+
+  async function addTextLayer() {
+    const resp = await runCmd(
       'add_text_layer',
-      (s,d) => ({ sourcePath:s, destPath:d, text:textContent, fontStyle, fontSize:Number(fontSize), colorHex:textColorHex, posX:Number(textX), posY:Number(textY) }),
-      'Add Text'
+      {
+        content: textContent,
+        fontStyle,
+        size: Number(fontSize),
+        colorHex: textColor,
+        depth3d: Number(textDepth),
+        strokeHex: strokeColor,
+        strokeWidth: Number(strokeWidth),
+        x: Number(textX),
+        y: Number(textY),
+      },
+      'Add 3D Text'
+    );
+    if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
+  }
+
+  function commitTransform() {
+    if (!selectedLayer) return;
+    runCmd(
+      'update_layer_transform',
+      {
+        layerId: selectedLayer.id,
+        x: Number(layerX),
+        y: Number(layerY),
+        scale: Number(layerScale),
+        rotation: Number(layerRot),
+        opacity: Number(layerOpacity),
+        blendMode: layerBlend,
+      },
+      'Transform Layer'
     );
   }
-  function setTextAlign(preset) {
-    if (preset === 'top')    { textY = Math.max(1, Math.round(imgHeight * 0.1)); }
-    if (preset === 'center') { textY = Math.round(imgHeight * 0.5); }
-    if (preset === 'bottom') { textY = Math.min(imgHeight - 10, Math.round(imgHeight * 0.85)); }
+
+  function commitEffects(overrideFilter = null) {
+    if (!selectedLayer) return;
+    const f = overrideFilter ?? fxFilter;
+    fxFilter = f;
+    runCmd(
+      'update_layer_effects',
+      {
+        layerId: selectedLayer.id,
+        brightness: Number(fxBrightness),
+        contrast: Number(fxContrast),
+        saturation: Number(fxSaturation),
+        blur: Number(fxBlur),
+        filter: f,
+      },
+      'Update Effects'
+    );
   }
 
-  // ── MCP helpers ────────────────────────────────────────────────────────
-  let connectResult = $state('');
+  function commitOutline() {
+    if (!selectedLayer) return;
+    runCmd(
+      'set_layer_outline',
+      {
+        layerId: selectedLayer.id,
+        enabled: outEnabled,
+        colorHex: outColor,
+        thickness: Number(outThickness),
+      },
+      'Update Outline'
+    );
+  }
+
+  function removeBg() {
+    if (!selectedLayer || selectedLayer.kind.type !== 'Image') return;
+    runCmd(
+      'remove_layer_background_color',
+      { layerId: selectedLayer.id, targetHex: bgTargetHex, tolerance: Number(bgTolerance) },
+      'Remove Background'
+    );
+  }
+
   async function connectClaude() {
     try {
       connectResult = await invoke('connect_claude_desktop');
-    } catch (e) { connectResult = `Error: ${e}`; }
+    } catch (e) {
+      connectResult = `Error: ${e}`;
+    }
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} onmouseup={onCanvasMouseUp} onmousemove={onCanvasMouseMove} />
 
 <div class="editor-shell">
-
-  <!-- ── Top Bar (48px) ──────────────────────────────────────── -->
+  <!-- ── Top Bar ────────────────────────────────────────────────────────── -->
   <header class="top-bar">
     <div class="tb-left">
-      <button class="btn-ghost icon-btn" onclick={onGoHome} title="Back to Home (keeps session)">
+      <button class="btn-ghost icon-btn" onclick={onGoHome} title="Back to Home">
         <ArrowLeft size={14} strokeWidth={2} /> Home
       </button>
       <div class="tb-divider"></div>
-      <button class="btn-ghost icon-btn sm" onclick={() => { onUndo(); filterBasePath = null; }} disabled={!canUndo} title="Undo (Ctrl+Z)">
+      <button class="btn-ghost icon-btn sm" onclick={saveVeltraxProject} disabled={!hasProject} title="Save .veltrax project">
+        <Save size={13} strokeWidth={2} /> Save
+      </button>
+      <button class="btn-ghost icon-btn sm" onclick={() => runCmd('undo_action', {}, 'Undo')} disabled={!project?.can_undo || isProcessing} title="Undo (Ctrl+Z)">
         <Undo2 size={13} strokeWidth={2} /> Undo
       </button>
-      <button class="btn-ghost icon-btn sm" onclick={() => { onRedo(); filterBasePath = null; }} disabled={!canRedo} title="Redo (Ctrl+Y)">
+      <button class="btn-ghost icon-btn sm" onclick={() => runCmd('redo_action', {}, 'Redo')} disabled={!project?.can_redo || isProcessing} title="Redo (Ctrl+Y)">
         <Redo2 size={13} strokeWidth={2} /> Redo
       </button>
     </div>
@@ -264,42 +365,24 @@
       <input
         class="project-name"
         type="text"
-        value={projectName}
-        oninput={(e) => onProjectNameChange(e.currentTarget.value)}
+        value={project?.project_name ?? 'Untitled Design'}
+        onchange={(e) => invoke('rename_project', { name: e.currentTarget.value })}
         spellcheck="false"
       />
-      {#if imgWidth}
-        <span class="dim-label">{imgWidth} × {imgHeight} px</span>
+      {#if hasProject}
+        <span class="dim-label">{canvasW} × {canvasH} px</span>
       {/if}
     </div>
 
     <div class="tb-right">
-      {#if hasImage}
-        <button
-          class="btn-ghost icon-btn sm"
-          onmousedown={() => (comparing = true)}
-          onmouseup={() => (comparing = false)}
-          onmouseleave={() => (comparing = false)}
-          title="Hold to compare with original"
-        >
-          <Columns2 size={13} strokeWidth={2} /> Compare
-        </button>
-      {/if}
-      <button
-        class="btn-primary icon-btn"
-        onclick={() => (showExportModal = true)}
-        disabled={!hasImage || isProcessing}
-        title="Export image"
-      >
+      <button class="btn-primary icon-btn" onclick={() => (showExportModal = true)} disabled={!hasProject || isProcessing}>
         <Download size={14} strokeWidth={2} /> Export
       </button>
     </div>
   </header>
 
-  <!-- ── Editor Body ─────────────────────────────────────────── -->
+  <!-- ── Body ───────────────────────────────────────────────────────────── -->
   <div class="editor-body">
-
-    <!-- Tool Rail (68px) -->
     <aside class="tool-rail">
       {#each tools as t}
         <button
@@ -314,165 +397,233 @@
       {/each}
     </aside>
 
-    <!-- Collapsible Tool Drawer -->
     <div class="tool-drawer" class:open={drawerOpen && activeTool}>
       {#if drawerOpen && activeTool}
         <div class="drawer-inner">
-          <div class="drawer-title">
-            {tools.find(t => t.id === activeTool)?.label}
-          </div>
+          <div class="drawer-title">{tools.find((t) => t.id === activeTool)?.label}</div>
 
-          <!-- ══ ADJUST ══ -->
-          {#if activeTool === 'adjust'}
+          <!-- ══ LAYERS ══ -->
+          {#if activeTool === 'layers'}
             <div class="panel">
-              {#each [['Brightness', brightness, (v) => brightness = v], ['Contrast', contrast, (v) => contrast = v], ['Saturation', saturation, (v) => saturation = v]] as [lbl, val, setter]}
-                <div class="slider-row">
-                  <div class="slider-label"><span>{lbl}</span><span class="mono">{val}</span></div>
-                  <input type="range" min="-100" max="100" step="1" value={val} oninput={(e) => setter(Number(e.currentTarget.value))} disabled={!hasImage} />
+              {#if layers.length === 0}
+                <p class="panel-note">No layers yet. Add an image overlay, 3D text, or shape from the left rail.</p>
+              {:else}
+                <div class="layer-list">
+                  {#each [...layers].reverse() as l, revIdx}
+                    {@const realIdx = layers.length - 1 - revIdx}
+                    <div
+                      class="layer-item"
+                      class:selected={l.id === selectedLayerId}
+                      onclick={() => (selectedLayerId = l.id)}
+                      role="button"
+                      tabindex="0"
+                    >
+                      <span class="layer-name">{l.name}</span>
+                      <div class="layer-actions" onclick={(e) => e.stopPropagation()} role="presentation">
+                        <button class="mini-btn" onclick={() => runCmd('reorder_layer', { layerId: l.id, newIndex: realIdx + 1 }, 'Move Up')} disabled={realIdx === layers.length - 1} title="Move Up"><ArrowUp size={12} /></button>
+                        <button class="mini-btn" onclick={() => runCmd('reorder_layer', { layerId: l.id, newIndex: Math.max(0, realIdx - 1) }, 'Move Down')} disabled={realIdx === 0} title="Move Down"><ArrowDown size={12} /></button>
+                        <button class="mini-btn" onclick={() => runCmd('toggle_layer_visibility', { layerId: l.id }, 'Toggle Visibility')} title="Visibility">
+                          {#if l.visible}<Eye size={12} />{:else}<EyeOff size={12} />{/if}
+                        </button>
+                        <button class="mini-btn" onclick={() => runCmd('toggle_layer_lock', { layerId: l.id }, 'Toggle Lock')} title="Lock">
+                          {#if l.locked}<Lock size={12} />{:else}<Unlock size={12} />{/if}
+                        </button>
+                        <button class="mini-btn" onclick={() => runCmd('duplicate_layer', { layerId: l.id }, 'Duplicate')} title="Duplicate"><Copy size={12} /></button>
+                        <button class="mini-btn danger" onclick={() => runCmd('delete_layer', { layerId: l.id }, 'Delete')} title="Delete"><Trash2 size={12} /></button>
+                      </div>
+                    </div>
+                  {/each}
                 </div>
-              {/each}
-              <div class="btn-row">
-                <button class="btn-ghost fw" onclick={resetAdjust} disabled={!hasImage}>Reset</button>
-                <button class="btn-primary fw" onclick={applyAdjust} disabled={!hasImage || isProcessing}>Apply</button>
-              </div>
-            </div>
+              {/if}
 
-          <!-- ══ FILTERS ══ -->
-          {:else if activeTool === 'filters'}
-            <div class="panel">
-              <!-- Original — restores clean base -->
-              <button
-                class="filter-card"
-                onclick={handleOriginalFilter}
-                disabled={!filterBasePath || isProcessing}
-                title="Restore image before filters"
-              >
-                <div class="filter-thumb" style="background:conic-gradient(from 90deg at 40% 40%,#6366f1,#ec4899,#f97316,#6366f1);"></div>
-                <span>Original</span>
-                {#if filterBasePath}<span class="filter-hint">click to restore</span>{/if}
-              </button>
-
-              {#each filters as f}
-                <button
-                  class="filter-card"
-                  onclick={() => handleFilterClick(f.id, f.label)}
-                  disabled={!hasImage || isProcessing}
-                  title="Apply {f.label}"
-                >
-                  <div class="filter-thumb" style={f.style}></div>
-                  <span>{f.label}</span>
+              {#if selectedLayer}
+                <div class="divider"></div>
+                <div class="section-title">Selected Layer Transform</div>
+                <div class="slider-row">
+                  <div class="slider-label"><span>Opacity</span><span class="mono">{Math.round(layerOpacity * 100)}%</span></div>
+                  <input type="range" min="0" max="1" step="0.05" bind:value={layerOpacity} />
+                </div>
+                <div class="field-block">
+                  <label class="field-lbl">Blend Mode</label>
+                  <select class="select-input" bind:value={layerBlend}>
+                    <option value="normal">Normal</option>
+                    <option value="multiply">Multiply</option>
+                    <option value="screen">Screen</option>
+                    <option value="overlay">Overlay</option>
+                  </select>
+                </div>
+                <div class="input-grid-2">
+                  <label class="field"><span>X</span><input type="number" bind:value={layerX} /></label>
+                  <label class="field"><span>Y</span><input type="number" bind:value={layerY} /></label>
+                  <label class="field"><span>Scale</span><input type="number" min="0.05" max="8" step="0.05" bind:value={layerScale} /></label>
+                  <label class="field"><span>Rotate °</span><input type="number" step="1" bind:value={layerRot} /></label>
+                </div>
+                <button class="btn-primary fw" onclick={commitTransform} disabled={isProcessing || selectedLayer.locked}>
+                  Apply Transform
                 </button>
-              {/each}
-
-              {#if filterBasePath}
-                <p class="filter-info">Applying from pre-filter state — switch freely without stacking.</p>
               {/if}
             </div>
 
-          <!-- ══ TRANSFORM ══ -->
-          {:else if activeTool === 'transform'}
+          <!-- ══ ELEMENTS & IMAGES ══ -->
+          {:else if activeTool === 'elements'}
             <div class="panel">
-              <div class="section-title">Rotate & Flip</div>
-              <div class="btn-grid-2">
-                <button class="btn-ghost" onclick={() => applyTransform('rotate90','Rotate 90°')} disabled={!hasImage||isProcessing}><RotateCw size={13} strokeWidth={2}/>90°</button>
-                <button class="btn-ghost" onclick={() => applyTransform('rotate180','Rotate 180°')} disabled={!hasImage||isProcessing}><RefreshCcw size={13} strokeWidth={2}/>180°</button>
-                <button class="btn-ghost" onclick={() => applyTransform('flip_h','Flip H')} disabled={!hasImage||isProcessing}><FlipHorizontal size={13} strokeWidth={2}/>Flip H</button>
-                <button class="btn-ghost" onclick={() => applyTransform('flip_v','Flip V')} disabled={!hasImage||isProcessing}><FlipVertical size={13} strokeWidth={2}/>Flip V</button>
+              <button class="btn-primary fw" onclick={addOverlayImage} disabled={!hasProject || isProcessing}>
+                <ImagePlus size={14} strokeWidth={2} /> Add Image / Icon Overlay
+              </button>
+
+              <div class="divider"></div>
+              <div class="section-title">Quick Shapes</div>
+              <div class="color-row">
+                <div class="color-preview" style="background:{shapeColor};"></div>
+                <input type="text" bind:value={shapeColor} maxlength="7" />
+              </div>
+              <div class="btn-grid-3">
+                <button class="btn-ghost" onclick={() => addShape('rectangle')} disabled={!hasProject || isProcessing}>Rect</button>
+                <button class="btn-ghost" onclick={() => addShape('circle')} disabled={!hasProject || isProcessing}>Circle</button>
+                <button class="btn-ghost" onclick={() => addShape('badge')} disabled={!hasProject || isProcessing}>Badge</button>
               </div>
 
-              <div class="section-title" style="margin-top:14px;">Crop</div>
-              <div class="input-grid-2">
-                <label class="field"><span>X</span><input type="number" min="0" bind:value={cropX} disabled={!hasImage}/></label>
-                <label class="field"><span>Y</span><input type="number" min="0" bind:value={cropY} disabled={!hasImage}/></label>
-                <label class="field"><span>W</span><input type="number" min="1" bind:value={cropW} disabled={!hasImage}/></label>
-                <label class="field"><span>H</span><input type="number" min="1" bind:value={cropH} disabled={!hasImage}/></label>
+              <div class="divider"></div>
+              <div class="section-title">Remove Background Color</div>
+              <p class="panel-note">Removes solid color from the selected Image layer to create clean PNG transparency.</p>
+              <div class="color-row">
+                <div class="color-preview" style="background:{bgTargetHex};"></div>
+                <input type="text" bind:value={bgTargetHex} maxlength="7" />
               </div>
-              <button class="btn-ghost fw" onclick={applyCrop} disabled={!hasImage||isProcessing}><Crop size={12} strokeWidth={2}/>Apply Crop</button>
-
-              <div class="section-title" style="margin-top:14px;">Resize</div>
-              <div class="input-grid-2">
-                <label class="field"><span>W px</span><input type="number" min="1" bind:value={resW} disabled={!hasImage}/></label>
-                <label class="field"><span>H px</span><input type="number" min="1" bind:value={resH} disabled={!hasImage}/></label>
+              <div class="slider-row">
+                <div class="slider-label"><span>Tolerance</span><span class="mono">{bgTolerance}</span></div>
+                <input type="range" min="1" max="150" step="1" bind:value={bgTolerance} />
               </div>
-              <button class="btn-ghost fw" onclick={applyResize} disabled={!hasImage||isProcessing}>Apply Resize</button>
+              <button
+                class="btn-ghost fw"
+                onclick={removeBg}
+                disabled={!selectedLayer || selectedLayer.kind.type !== 'Image' || isProcessing}
+              >
+                <Eraser size={13} strokeWidth={2} /> Remove Background
+              </button>
             </div>
 
-          <!-- ══ TEXT ══ -->
+          <!-- ══ TEXT & 3D ══ -->
           {:else if activeTool === 'text'}
             <div class="panel">
               <div class="field-block">
                 <label class="field-lbl">Text Content</label>
-                <textarea class="text-area" bind:value={textContent} rows="2" placeholder="Your text here" disabled={!hasImage}></textarea>
+                <textarea class="text-area" bind:value={textContent} rows="2" disabled={!hasProject}></textarea>
               </div>
 
               <div class="field-block">
                 <label class="field-lbl">Font Style</label>
                 <div class="font-grid">
                   {#each fontStyles as fs}
-                    <button
-                      class="font-btn"
-                      class:selected={fontStyle === fs.id}
-                      onclick={() => (fontStyle = fs.id)}
-                      disabled={!hasImage}
-                    >
-                      {fs.label}
-                    </button>
+                    <button class="font-btn" class:selected={fontStyle === fs.id} onclick={() => (fontStyle = fs.id)}>{fs.label}</button>
                   {/each}
                 </div>
               </div>
 
-              <div class="field-block">
-                <label class="field-lbl">Font Size</label>
-                <input type="number" min="8" max="400" bind:value={fontSize} disabled={!hasImage} />
+              <div class="input-grid-2">
+                <label class="field"><span>Size (px)</span><input type="number" min="12" max="400" bind:value={fontSize} /></label>
+                <label class="field"><span>3D Depth</span><input type="number" min="0" max="30" bind:value={textDepth} /></label>
               </div>
 
-              <div class="field-block">
-                <label class="field-lbl">Text Color</label>
-                <div class="color-row">
-                  <div class="color-preview" style="background:{textColorHex};"></div>
-                  <input type="text" bind:value={textColorHex} placeholder="#FFFFFF" maxlength="7" disabled={!hasImage} style="width:90px;" />
-                </div>
-                <div class="quick-colors">
-                  {#each quickColors as c}
-                    <button class="color-swatch" style="background:{c};" onclick={() => (textColorHex = c)} title={c}></button>
-                  {/each}
-                </div>
+              <div class="input-grid-2">
+                <label class="field"><span>Fill Hex</span><input type="text" bind:value={textColor} maxlength="7" /></label>
+                <label class="field"><span>Stroke Hex</span><input type="text" bind:value={strokeColor} maxlength="7" /></label>
               </div>
 
-              <div class="field-block">
-                <label class="field-lbl">Position</label>
-                <div class="input-grid-2">
-                  <label class="field"><span>X px</span><input type="number" bind:value={textX} disabled={!hasImage} /></label>
-                  <label class="field"><span>Y px</span><input type="number" bind:value={textY} disabled={!hasImage} /></label>
-                </div>
-                <div class="btn-grid-3" style="margin-top:6px;">
-                  <button class="btn-ghost" onclick={() => setTextAlign('top')}    disabled={!hasImage}>Top</button>
-                  <button class="btn-ghost" onclick={() => setTextAlign('center')} disabled={!hasImage}>Center</button>
-                  <button class="btn-ghost" onclick={() => setTextAlign('bottom')} disabled={!hasImage}>Bottom</button>
-                </div>
+              <div class="quick-colors">
+                {#each quickColors as c}
+                  <button class="color-swatch" style="background:{c};" onclick={() => (textColor = c)} title={c}></button>
+                {/each}
               </div>
 
-              <button class="btn-primary fw" onclick={applyText} disabled={!hasImage || isProcessing || !textContent.trim()}>
-                Apply Text to Image
+              <div class="btn-grid-2">
+                <button class="btn-ghost" onclick={() => (textX = Math.max(0, Math.round(canvasW * 0.25)))}>
+                  <AlignCenterHorizontal size={12} /> Center H
+                </button>
+                <button class="btn-ghost" onclick={() => (textY = Math.max(0, Math.round(canvasH * 0.4)))}>
+                  <AlignCenterVertical size={12} /> Center V
+                </button>
+              </div>
+
+              <div class="input-grid-2">
+                <label class="field"><span>X px</span><input type="number" bind:value={textX} /></label>
+                <label class="field"><span>Y px</span><input type="number" bind:value={textY} /></label>
+              </div>
+
+              <button class="btn-primary fw" onclick={addTextLayer} disabled={!hasProject || isProcessing || !textContent.trim()}>
+                Add 3D Text Layer
               </button>
             </div>
 
-          <!-- ══ IMAGE ══ -->
-          {:else if activeTool === 'image'}
+          <!-- ══ ADJUST & FILTERS ══ -->
+          {:else if activeTool === 'adjust'}
             <div class="panel">
-              <p class="panel-note">Replace the current canvas or open a new image file.</p>
-              <button class="btn-ghost fw" disabled={isProcessing}
-                onclick={async () => {
-                  const { open: od } = await import('@tauri-apps/plugin-dialog');
-                  const sel = await od({ multiple: false, filters: [{ name: 'Images', extensions: ['png','jpg','jpeg','webp','bmp'] }] });
-                  if (!sel) return;
-                  const dims = await invoke('get_image_dimensions', { path: sel });
-                  onPushHistory(sel, dims.width, dims.height);
-                  filterBasePath = null; cacheBuster += 1;
-                }}
-              >
-                <FolderOpen size={13} strokeWidth={2} /> Open / Replace Image
-              </button>
+              {#if !selectedLayer}
+                <p class="panel-note">Select a layer to adjust brightness, contrast, saturation, blur, or filters.</p>
+              {:else}
+                <div class="slider-row">
+                  <div class="slider-label"><span>Brightness</span><span class="mono">{fxBrightness}</span></div>
+                  <input type="range" min="-100" max="100" step="1" bind:value={fxBrightness} />
+                </div>
+                <div class="slider-row">
+                  <div class="slider-label"><span>Contrast</span><span class="mono">{fxContrast}</span></div>
+                  <input type="range" min="-100" max="100" step="1" bind:value={fxContrast} />
+                </div>
+                <div class="slider-row">
+                  <div class="slider-label"><span>Saturation</span><span class="mono">{fxSaturation}</span></div>
+                  <input type="range" min="-100" max="100" step="1" bind:value={fxSaturation} />
+                </div>
+                <div class="slider-row">
+                  <div class="slider-label"><span>Blur</span><span class="mono">{fxBlur}</span></div>
+                  <input type="range" min="0" max="20" step="0.5" bind:value={fxBlur} />
+                </div>
+                <button class="btn-primary fw" onclick={() => commitEffects()} disabled={isProcessing}>
+                  Apply Adjustments
+                </button>
+
+                <div class="divider"></div>
+                <div class="section-title">Non-Destructive Filters</div>
+                {#each filters as f}
+                  <button
+                    class="filter-card"
+                    class:selected={fxFilter === f.id}
+                    onclick={() => commitEffects(f.id)}
+                    disabled={isProcessing}
+                  >
+                    <div class="filter-thumb" style={f.style}></div>
+                    <span>{f.label}</span>
+                  </button>
+                {/each}
+              {/if}
+            </div>
+
+          <!-- ══ OUTLINE & GLOW ══ -->
+          {:else if activeTool === 'outline'}
+            <div class="panel">
+              {#if !selectedLayer}
+                <p class="panel-note">Select a layer (PNG cutout, text, or shape) to add an outer border.</p>
+              {:else}
+                <label class="checkbox-row">
+                  <input type="checkbox" bind:checked={outEnabled} />
+                  <span>Enable Layer Outline</span>
+                </label>
+                <div class="color-row">
+                  <div class="color-preview" style="background:{outColor};"></div>
+                  <input type="text" bind:value={outColor} maxlength="7" />
+                </div>
+                <div class="quick-colors">
+                  {#each quickColors as c}
+                    <button class="color-swatch" style="background:{c};" onclick={() => (outColor = c)} title={c}></button>
+                  {/each}
+                </div>
+                <div class="slider-row">
+                  <div class="slider-label"><span>Thickness</span><span class="mono">{outThickness} px</span></div>
+                  <input type="range" min="1" max="24" step="1" bind:value={outThickness} />
+                </div>
+                <button class="btn-primary fw" onclick={commitOutline} disabled={isProcessing}>
+                  Apply Outline
+                </button>
+              {/if}
             </div>
 
           <!-- ══ MCP AI ══ -->
@@ -484,12 +635,12 @@
                   {#if mcpIsActive}
                     <strong style="color:var(--text-primary)">Active &amp; Ready</strong>
                   {:else}
-                    Standby — Open an image to enable AI
+                    Standby — Open a project to enable AI
                   {/if}
                 </span>
               </div>
               <p class="panel-note">
-                Claude can see and edit your canvas when an image is open in the Editor.
+                Claude Desktop can inspect layers, add 3D text, remove backgrounds, and compose thumbnails in real time.
               </p>
               <button class="btn-ghost fw" onclick={connectClaude}>
                 <Plug size={13} strokeWidth={2} /> Connect to Claude Desktop
@@ -499,181 +650,182 @@
               {/if}
             </div>
           {/if}
-
         </div>
       {/if}
 
-      <!-- Drawer toggle arrow -->
       <button
         class="drawer-toggle"
-        onclick={() => { drawerOpen = !drawerOpen; }}
+        onclick={() => (drawerOpen = !drawerOpen)}
         title={drawerOpen ? 'Collapse panel' : 'Expand panel'}
       >
-        {#if drawerOpen}<ChevronLeft size={13} strokeWidth={2}/>{:else}<ChevronRight size={13} strokeWidth={2}/>{/if}
+        {#if drawerOpen}<ChevronLeft size={13} strokeWidth={2} />{:else}<ChevronRight size={13} strokeWidth={2} />{/if}
       </button>
     </div>
 
-    <!-- ── Canvas Area ───────────────────────────────────────── -->
+    <!-- ── Interactive Canvas ─────────────────────────────────────────────── -->
     <div class="canvas-area" bind:this={canvasArea} use:wheelZoom>
-      {#if hasImage}
-        <div class="canvas-frame" style="width:{imgWidth * zoom}px; height:{imgHeight * zoom}px;">
+      {#if hasProject}
+        <div
+          class="canvas-frame"
+          class:transparent-checker={transparentBg}
+          style="width:{canvasW * zoom}px; height:{canvasH * zoom}px; cursor:{selectedLayer && !selectedLayer.locked ? (isDragging ? 'grabbing' : 'grab') : 'default'};"
+          onmousedown={onCanvasMouseDown}
+          role="presentation"
+        >
           <img
             src={previewUrl}
-            alt="Canvas"
-            width={imgWidth * zoom}
-            height={imgHeight * zoom}
+            alt="Veltrax Studios Canvas"
+            width={canvasW * zoom}
+            height={canvasH * zoom}
             style="display:block; width:100%; height:100%; object-fit:fill;"
-            onload={onImageLoad}
+            onload={fitToScreen}
             draggable="false"
           />
           {#if isProcessing}
-            <div class="processing-overlay">Processing in Rust…</div>
-          {/if}
-          {#if comparing && history.length > 0}
-            <div class="compare-badge">Original</div>
+            <div class="processing-overlay">Rendering layers in Rust…</div>
           {/if}
         </div>
       {:else}
         <div class="empty-canvas">
-          <ImageIcon size={42} strokeWidth={1.1} />
-          <h3>No Image Loaded</h3>
-          <p>Go back to Home and open an image or create a canvas.</p>
-          <button class="btn-ghost" onclick={onGoHome}><ArrowLeft size={13} strokeWidth={2}/>Back to Home</button>
+          <Layers size={42} strokeWidth={1.1} />
+          <h3>No Active Project</h3>
+          <p>Return Home to open an image or create a transparent PNG canvas.</p>
+          <button class="btn-ghost" onclick={onGoHome}><ArrowLeft size={13} strokeWidth={2} /> Back to Home</button>
         </div>
       {/if}
 
-      <!-- Bottom Bar -->
       <div class="bottom-bar">
         <span class="step-pill">
-          {stepLabel}
-          {#if errorMsg}<span class="err-dot" title={errorMsg}>⚠</span>{/if}
+          {layers.length} layers · {project?.undo_count ?? 0} undo
+          {#if errorMsg}<span class="err-dot" title={errorMsg}>!</span>{:else}· {statusMsg}{/if}
         </span>
         <div class="zoom-controls">
-          <button class="zoom-btn" onclick={() => zoom = Math.max(0.05, zoom - 0.1)}>−</button>
+          <button class="zoom-btn" onclick={() => (zoom = Math.max(0.05, zoom - 0.1))}>−</button>
           <input
-            type="range" min="5" max="300" step="1"
+            type="range" min="10" max="300" step="1"
             value={zoomPct}
-            oninput={(e) => zoom = Number(e.currentTarget.value) / 100}
+            oninput={(e) => (zoom = Number(e.currentTarget.value) / 100)}
             style="width:90px;"
           />
           <span class="zoom-pct">{zoomPct}%</span>
-          <button class="zoom-btn" onclick={() => zoom = Math.min(3.0, zoom + 0.1)}>+</button>
-          <button class="zoom-btn" onclick={fitToScreen} title="Fit to screen"><Maximize2 size={11} strokeWidth={2}/></button>
+          <button class="zoom-btn" onclick={() => (zoom = Math.min(3.0, zoom + 0.1))}>+</button>
+          <button class="zoom-btn" onclick={fitToScreen} title="Fit to screen"><Maximize2 size={11} strokeWidth={2} /></button>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Export Modal -->
   <ExportModal
     show={showExportModal}
-    {currentPath}
-    {projectName}
-    {imgWidth}
-    {imgHeight}
+    {hasProject}
+    projectName={project?.project_name ?? 'export'}
+    imgWidth={canvasW}
+    imgHeight={canvasH}
+    {transparentBg}
     onClose={() => (showExportModal = false)}
   />
 </div>
 
 <style>
   .editor-shell { display:flex; flex-direction:column; height:100vh; width:100vw; overflow:hidden; background:var(--bg-canvas); }
-
-  /* Top Bar */
   .top-bar { height:48px; flex-shrink:0; background:var(--bg-sidebar); border-bottom:1px solid var(--border); display:flex; align-items:center; padding:0 12px; gap:8px; }
   .tb-left,.tb-right { display:flex; align-items:center; gap:6px; flex:1; }
   .tb-right { justify-content:flex-end; }
   .tb-center { display:flex; align-items:center; gap:10px; flex-shrink:0; }
   .tb-divider { width:1px; height:20px; background:var(--border); margin:0 2px; }
-  .icon-btn  { display:flex; align-items:center; gap:5px; white-space:nowrap; }
+  .icon-btn { display:flex; align-items:center; gap:5px; white-space:nowrap; }
   .icon-btn.sm { font-size:12px; padding:5px 10px; }
   .project-name { background:transparent; border:1px solid transparent; border-radius:var(--r-sm); color:var(--text-primary); font-size:13px; font-weight:600; padding:4px 8px; max-width:200px; text-align:center; min-width:120px; }
-  .project-name:hover  { border-color:var(--border); background:var(--bg-input); }
-  .project-name:focus  { border-color:var(--accent); background:var(--bg-input); outline:none; }
+  .project-name:hover { border-color:var(--border); background:var(--bg-input); }
+  .project-name:focus { border-color:var(--accent); background:var(--bg-input); outline:none; }
   .dim-label { font-size:11px; color:var(--text-muted); background:var(--bg-elevated); padding:3px 8px; border-radius:999px; border:1px solid var(--border); }
 
-  /* Editor Body */
   .editor-body { flex:1; display:flex; min-height:0; overflow:hidden; }
-
-  /* Tool Rail */
   .tool-rail { width:68px; flex-shrink:0; background:var(--bg-sidebar); border-right:1px solid var(--border); display:flex; flex-direction:column; align-items:center; padding:10px 0; gap:2px; }
-  .rail-btn { display:flex; flex-direction:column; align-items:center; gap:4px; width:56px; padding:9px 4px; border-radius:var(--r-sm); background:transparent; border:1px solid transparent; color:var(--text-secondary); font-size:9px; font-weight:500; }
+  .rail-btn { display:flex; flex-direction:column; align-items:center; gap:4px; width:58px; padding:9px 4px; border-radius:var(--r-sm); background:transparent; border:1px solid transparent; color:var(--text-secondary); font-size:9px; font-weight:500; }
   .rail-btn:hover:not(:disabled) { background:var(--bg-elevated); color:var(--text-primary); border-color:var(--border); }
   .rail-btn.active { background:var(--accent-subtle); color:var(--text-primary); border-color:var(--border-active); }
 
-  /* Drawer */
   .tool-drawer { position:relative; width:0; flex-shrink:0; overflow:visible; background:var(--bg-card); border-right:1px solid var(--border); transition:width 0.22s cubic-bezier(0.4,0,0.2,1); display:flex; }
-  .tool-drawer.open { width:270px; overflow:hidden; }
-  .drawer-inner { width:270px; flex-shrink:0; padding:14px 13px; overflow-y:auto; display:flex; flex-direction:column; gap:12px; }
+  .tool-drawer.open { width:276px; overflow:hidden; }
+  .drawer-inner { width:276px; flex-shrink:0; padding:14px 13px; overflow-y:auto; display:flex; flex-direction:column; gap:12px; }
   .drawer-title { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-secondary); padding-bottom:10px; border-bottom:1px solid var(--border); }
   .drawer-toggle { position:absolute; right:-14px; top:50%; transform:translateY(-50%); width:14px; height:48px; background:var(--bg-elevated); border:1px solid var(--border); border-left:none; border-radius:0 6px 6px 0; display:grid; place-items:center; color:var(--text-secondary); z-index:10; padding:0; }
-  .drawer-toggle:hover:not(:disabled) { background:var(--bg-card-hover); color:var(--text-primary); transform:translateY(-50%) scale(1); }
 
-  /* Panel internals */
   .panel { display:flex; flex-direction:column; gap:10px; }
+  .divider { height:1px; background:var(--border); margin:4px 0; }
+  .section-title { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); }
+  .fw { width:100%; display:flex; align-items:center; justify-content:center; gap:6px; }
+  .panel-note { font-size:12px; color:var(--text-secondary); line-height:1.5; }
+
+  /* Layers list */
+  .layer-list { display:flex; flex-direction:column; gap:6px; max-height:240px; overflow-y:auto; }
+  .layer-item { display:flex; align-items:center; justify-content:space-between; gap:6px; padding:8px 9px; border-radius:var(--r-sm); background:var(--bg-elevated); border:1.5px solid var(--border); cursor:pointer; }
+  .layer-item.selected { border-color:var(--accent); background:var(--accent-subtle); }
+  .layer-name { font-size:12px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .layer-actions { display:flex; gap:2px; flex-shrink:0; }
+  .mini-btn { width:22px; height:22px; display:grid; place-items:center; border-radius:4px; background:transparent; color:var(--text-secondary); padding:0; }
+  .mini-btn:hover:not(:disabled) { background:var(--bg-card-hover); color:var(--text-primary); }
+  .mini-btn.danger:hover:not(:disabled) { color:#f87171; }
+
   .slider-row { display:flex; flex-direction:column; gap:5px; }
   .slider-label { display:flex; justify-content:space-between; font-size:11px; color:var(--text-secondary); }
   .mono { font-variant-numeric:tabular-nums; color:var(--text-primary); }
-  .btn-row { display:flex; gap:8px; }
-  .fw { width:100%; display:flex; align-items:center; justify-content:center; gap:6px; }
-  .section-title { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); }
-  .btn-grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
-  .btn-grid-2 button,.btn-grid-3 button { display:flex; align-items:center; justify-content:center; gap:4px; font-size:11px; }
-  .btn-grid-3 { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
   .input-grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .btn-grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .btn-grid-3 { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+  .btn-grid-2 button, .btn-grid-3 button { display:flex; align-items:center; justify-content:center; gap:4px; font-size:11px; }
   .field { display:flex; flex-direction:column; gap:3px; font-size:10px; color:var(--text-secondary); }
-
-  /* Filters */
-  .filter-card { display:flex; align-items:center; gap:10px; background:var(--bg-elevated); border:1px solid var(--border); border-radius:var(--r-sm); padding:8px 10px; color:var(--text-secondary); font-size:12px; font-weight:500; }
-  .filter-card:hover:not(:disabled) { border-color:var(--border-active); color:var(--text-primary); background:var(--bg-card-hover); }
-  .filter-thumb { width:36px; height:24px; border-radius:4px; flex-shrink:0; }
-  .filter-hint  { font-size:10px; color:var(--accent); margin-left:auto; }
-  .filter-info  { font-size:11px; color:var(--text-muted); font-style:italic; }
-
-  /* Text tool */
   .field-block { display:flex; flex-direction:column; gap:5px; }
-  .field-lbl   { font-size:11px; font-weight:600; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.05em; }
-  .text-area {
-    font-family:var(--font); font-size:13px; resize:vertical; min-height:52px;
-    background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-input);
-    border-radius:var(--r-sm); padding:7px 9px; outline:none; width:100%;
-  }
-  .text-area:focus { border-color:var(--accent); }
+  .field-lbl { font-size:11px; font-weight:600; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.05em; }
+  .select-input { background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-input); border-radius:var(--r-sm); padding:7px 9px; font-size:12px; outline:none; }
+
+  .text-area { font-family:var(--font); font-size:13px; resize:vertical; min-height:52px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-input); border-radius:var(--r-sm); padding:7px 9px; outline:none; width:100%; }
   .font-grid { display:grid; grid-template-columns:1fr 1fr; gap:5px; }
   .font-btn { padding:7px 6px; border-radius:var(--r-sm); background:var(--bg-elevated); border:1.5px solid var(--border); color:var(--text-secondary); font-size:11px; }
-  .font-btn:hover:not(:disabled)  { border-color:var(--border-active); color:var(--text-primary); }
   .font-btn.selected { background:var(--accent-subtle); border-color:var(--accent); color:var(--text-primary); font-weight:600; }
+
   .color-row { display:flex; align-items:center; gap:8px; }
   .color-preview { width:28px; height:28px; border-radius:6px; border:1px solid var(--border); flex-shrink:0; }
   .quick-colors { display:flex; gap:6px; flex-wrap:wrap; }
-  .color-swatch { width:22px; height:22px; border-radius:50%; border:2px solid var(--border); padding:0; cursor:pointer; }
-  .color-swatch:hover:not(:disabled) { transform:scale(1.2) translateY(-1px); border-color:var(--accent); }
+  .color-swatch { width:20px; height:20px; border-radius:50%; border:2px solid var(--border); padding:0; }
 
-  /* MCP */
+  .filter-card { display:flex; align-items:center; gap:10px; background:var(--bg-elevated); border:1.5px solid var(--border); border-radius:var(--r-sm); padding:8px 10px; color:var(--text-secondary); font-size:12px; font-weight:500; }
+  .filter-card.selected { border-color:var(--accent); background:var(--accent-subtle); color:var(--text-primary); }
+  .filter-thumb { width:34px; height:22px; border-radius:4px; flex-shrink:0; }
+
+  .checkbox-row { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text-primary); cursor:pointer; }
+  .checkbox-row input { width:auto; accent-color:var(--accent); }
+
   .mcp-status-row { display:flex; align-items:center; gap:9px; font-size:12px; color:var(--text-secondary); }
   .status-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
-  .status-dot.active  { background:#10b981; box-shadow:0 0 8px rgba(16,185,129,0.6); }
+  .status-dot.active { background:#10b981; box-shadow:0 0 8px rgba(16,185,129,0.6); }
   .status-dot.standby { background:#f59e0b; box-shadow:0 0 6px rgba(245,158,11,0.4); }
-  .connect-result { font-size:11px; color:#34d399; line-height:1.5; }
-  .panel-note { font-size:12px; color:var(--text-secondary); line-height:1.55; }
+  .connect-result { font-size:11px; color:#34d399; line-height:1.5; white-space:pre-wrap; }
 
-  /* Canvas area */
+  /* Canvas */
   .canvas-area { flex:1; min-width:0; min-height:0; position:relative; overflow:auto; display:flex; align-items:center; justify-content:center; }
-  .canvas-area::before { content:''; position:absolute; inset:0; background-image:linear-gradient(45deg,#1a1d26 25%,transparent 25%),linear-gradient(-45deg,#1a1d26 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#1a1d26 75%),linear-gradient(-45deg,transparent 75%,#1a1d26 75%); background-size:24px 24px; background-position:0 0,0 12px,12px -12px,-12px 0; opacity:0.14; pointer-events:none; }
-  .canvas-frame { position:relative; flex-shrink:0; border-radius:4px; overflow:hidden; box-shadow:0 0 0 1px rgba(255,255,255,0.06),0 24px 60px rgba(0,0,0,0.6); }
-  .canvas-frame img { display:block; }
+  .canvas-frame { position:relative; flex-shrink:0; border-radius:4px; overflow:hidden; box-shadow:0 0 0 1px rgba(255,255,255,0.08),0 24px 60px rgba(0,0,0,0.6); }
+  .canvas-frame.transparent-checker {
+    background-image:
+      linear-gradient(45deg, #252933 25%, transparent 25%),
+      linear-gradient(-45deg, #252933 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #252933 75%),
+      linear-gradient(-45deg, transparent 75%, #252933 75%);
+    background-size: 20px 20px;
+    background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+    background-color: #161920;
+  }
   .processing-overlay { position:absolute; inset:0; background:rgba(13,15,18,0.7); backdrop-filter:blur(4px); display:grid; place-items:center; font-size:13px; font-weight:600; color:var(--text-secondary); }
-  .compare-badge { position:absolute; top:10px; left:10px; background:rgba(0,0,0,0.65); border:1px solid rgba(255,255,255,0.15); border-radius:999px; padding:3px 10px; font-size:11px; color:#f1f3f8; }
   .empty-canvas { display:flex; flex-direction:column; align-items:center; gap:14px; text-align:center; color:var(--text-secondary); max-width:320px; }
   .empty-canvas h3 { font-size:17px; color:var(--text-primary); }
-  .empty-canvas p  { font-size:13px; }
+  .empty-canvas p { font-size:13px; }
   .empty-canvas button { display:flex; align-items:center; gap:6px; }
 
-  /* Bottom bar */
-  .bottom-bar { position:absolute; bottom:14px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:14px; background:var(--bg-elevated); border:1px solid var(--border); border-radius:999px; padding:6px 14px; pointer-events:auto; }
-  .step-pill { font-size:12px; color:var(--text-secondary); display:flex; align-items:center; gap:4px; }
-  .err-dot { color:#f87171; font-size:11px; }
+  .bottom-bar { position:absolute; bottom:14px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:14px; background:var(--bg-elevated); border:1px solid var(--border); border-radius:999px; padding:6px 14px; }
+  .step-pill { font-size:12px; color:var(--text-secondary); display:flex; align-items:center; gap:6px; white-space:nowrap; }
+  .err-dot { color:#f87171; font-weight:700; }
   .zoom-controls { display:flex; align-items:center; gap:5px; }
   .zoom-btn { width:22px; height:22px; display:grid; place-items:center; border-radius:50%; background:var(--bg-card-hover); border:1px solid var(--border); color:var(--text-secondary); font-size:14px; line-height:1; padding:0; }
-  .zoom-btn:hover:not(:disabled) { background:var(--accent-subtle); border-color:var(--border-active); color:var(--text-primary); }
   .zoom-pct { font-size:12px; font-variant-numeric:tabular-nums; color:var(--text-primary); min-width:34px; text-align:center; }
 </style>

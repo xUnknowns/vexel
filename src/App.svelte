@@ -1,123 +1,113 @@
 <script>
   import { invoke } from '@tauri-apps/api/core';
-  import { tempDir, join } from '@tauri-apps/api/path';
+  import { listen } from '@tauri-apps/api/event';
   import { open } from '@tauri-apps/plugin-dialog';
-  import Dashboard   from './lib/Dashboard.svelte';
+  import Dashboard from './lib/Dashboard.svelte';
   import CreateModal from './lib/CreateModal.svelte';
-  import Editor      from './lib/Editor.svelte';
+  import Editor from './lib/Editor.svelte';
 
-  // ── Global state ────────────────────────────────────────────────────────
-  let view            = $state('dashboard');
+  let view = $state('dashboard'); // 'dashboard' | 'editor'
   let showCreateModal = $state(false);
-  let history         = $state([]);
-  let historyIndex    = $state(-1);
-  let recentProjects  = $state([]);
-  let projectName     = $state('Untitled Design');
-  let imgWidth        = $state(0);
-  let imgHeight       = $state(0);
+  let project = $state(null); // ProjectResponse from Rust
+  let cacheBuster = $state(0);
+  let recentProjects = $state([]);
 
-  // ── Derived ─────────────────────────────────────────────────────────────
-  let currentPath = $derived(historyIndex >= 0 ? history[historyIndex] : null);
-  let canUndo     = $derived(historyIndex > 0);
-  let canRedo     = $derived(historyIndex < history.length - 1);
-  let mcpIsActive = $derived(view === 'editor' && Boolean(currentPath));
+  let hasProject = $derived(Boolean(project && project.preview_path));
+  let mcpIsActive = $derived(view === 'editor' && hasProject);
 
-  // ── Sync editor state to Rust whenever it changes ───────────────────────
   $effect(() => {
-    invoke('update_editor_state', {
-      isInEditor:      view === 'editor',
-      activeImagePath: currentPath ?? null,
-    }).catch(console.error);
+    invoke('set_editor_active', { isInEditor: view === 'editor' }).catch(console.error);
   });
 
-  // ── Helpers ──────────────────────────────────────────────────────────────
-  function fileName(p) { return p ? (p.split(/[/\\]/).pop() || p) : ''; }
-  function fileExt(p)  { const n = fileName(p); const d = n.lastIndexOf('.'); return d !== -1 ? n.slice(d+1).toLowerCase() : 'png'; }
+  $effect(() => {
+    const unlisten = listen('mcp-project-updated', (event) => {
+      project = event.payload;
+      cacheBuster += 1;
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  });
 
-  async function makeTempPath(source) {
-    const dir = await tempDir();
-    const ext = ['png','jpg','jpeg','webp','bmp'].includes(fileExt(source)) ? fileExt(source) : 'png';
-    return await join(dir, `veltrax-${Date.now()}-${Math.random().toString(36).slice(2,8)}.${ext}`);
-  }
-  async function makeTempPng() {
-    return await join(await tempDir(), `veltrax-canvas-${Date.now()}.png`);
-  }
-
-  // ── State mutations ───────────────────────────────────────────────────────
-  function pushHistory(path, w, h) {
-    history      = [...history.slice(0, historyIndex + 1), path];
-    historyIndex = history.length - 1;
-    if (w) imgWidth  = w;
-    if (h) imgHeight = h;
-  }
-  function undo() { if (canUndo) historyIndex -= 1; }
-  function redo() { if (canRedo) historyIndex += 1; }
-
-  async function loadImage(filePath) {
-    try {
-      const dims = await invoke('get_image_dimensions', { path: filePath });
-      history      = [filePath];
-      historyIndex = 0;
-      imgWidth     = dims.width;
-      imgHeight    = dims.height;
-      projectName  = fileName(filePath).replace(/\.[^.]+$/, '');
-      addRecent(filePath, dims.width, dims.height);
-      showCreateModal = false;
-      view = 'editor';
-    } catch (e) { console.error('loadImage:', e); }
+  function applyProjectUpdate(resp) {
+    project = resp;
+    cacheBuster += 1;
   }
 
-  function addRecent(filePath, w, h) {
+  function fileName(p) {
+    return p ? p.split(/[/\\]/).pop() || p : '';
+  }
+
+  function addRecent(filePath, w, h, name) {
     recentProjects = [
-      { path: filePath, name: fileName(filePath), width: w, height: h,
-        time: new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' }) },
-      ...recentProjects.filter(r => r.path !== filePath),
+      {
+        path: filePath,
+        name: name || fileName(filePath),
+        width: w,
+        height: h,
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      },
+      ...recentProjects.filter((r) => r.path !== filePath),
     ].slice(0, 12);
   }
 
-  // ── Handlers ──────────────────────────────────────────────────────────────
+  async function loadImage(filePath) {
+    try {
+      const lower = filePath.toLowerCase();
+      const resp = lower.endsWith('.veltrax')
+        ? await invoke('load_project_file', { sourcePath: filePath })
+        : await invoke('open_base_image', { imagePath: filePath });
+
+      applyProjectUpdate(resp);
+      addRecent(filePath, resp.canvas_width, resp.canvas_height, resp.project_name);
+      showCreateModal = false;
+      view = 'editor';
+    } catch (e) {
+      console.error('loadImage:', e);
+    }
+  }
+
   async function handleOpenFile() {
     const sel = await open({
       multiple: false,
-      title: 'Open Image',
-      filters: [{ name: 'Images', extensions: ['png','jpg','jpeg','webp','bmp','gif','tiff'] }],
+      title: 'Open Image or Veltrax Project',
+      filters: [
+        { name: 'Images & Projects', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'tiff', 'veltrax'] },
+      ],
     });
     if (typeof sel === 'string' && sel) await loadImage(sel);
   }
 
-  async function handleCreatePreset(w, h, name) {
+  async function handleCreatePreset(w, h, name, transparentBg = false) {
     try {
-      const dest = await makeTempPng();
-      await invoke('create_blank_canvas', { destPath: dest, width: w, height: h });
-      history = [dest]; historyIndex = 0;
-      imgWidth = w; imgHeight = h; projectName = name;
-      showCreateModal = false; view = 'editor';
-    } catch (e) { console.error('createPreset:', e); }
+      const resp = await invoke('create_project', {
+        width: w,
+        height: h,
+        transparentBg,
+        projectName: name,
+      });
+      applyProjectUpdate(resp);
+      showCreateModal = false;
+      view = 'editor';
+    } catch (e) {
+      console.error('createPreset:', e);
+    }
   }
 </script>
 
 {#if view === 'editor'}
   <Editor
-    {history}
-    {historyIndex}
-    {currentPath}
-    {canUndo}
-    {canRedo}
-    {imgWidth}
-    {imgHeight}
-    {projectName}
+    {project}
+    {cacheBuster}
     {mcpIsActive}
-    {makeTempPath}
-    onUndo={undo}
-    onRedo={redo}
-    onPushHistory={pushHistory}
+    onProjectUpdate={applyProjectUpdate}
     onGoHome={() => (view = 'dashboard')}
-    onProjectNameChange={(n) => (projectName = n)}
   />
 {:else}
   <Dashboard
     {recentProjects}
     {mcpIsActive}
+    {hasProject}
     onGoToEditor={() => (view = 'editor')}
     onShowModal={() => (showCreateModal = true)}
     onOpenFile={handleOpenFile}
