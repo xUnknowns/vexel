@@ -6,7 +6,9 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            tools::adjust_brightness_contrast,
+            tools::get_image_dimensions,
+            tools::create_blank_canvas,
+            tools::adjust_brightness_contrast_saturation,
             tools::transform_image,
             tools::crop_image,
             tools::resize_image,
