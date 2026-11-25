@@ -7,11 +7,14 @@
     ChevronLeft, ChevronRight, Maximize2, Eye, EyeOff,
     Lock, Unlock, Copy, Trash2, ArrowUp, ArrowDown,
     ImagePlus, Eraser, AlignCenterHorizontal, AlignCenterVertical,
-    Stamp, Search, FlipHorizontal, FlipVertical, Upload, X
+    Stamp, Search, FlipHorizontal, FlipVertical, Upload, X,
+    Grid3x3, Ruler, FolderPlus, Ungroup
   } from 'lucide-svelte';
   import ExportModal from './ExportModal.svelte';
   import CanvasGizmo from './CanvasGizmo.svelte';
   import McpPanel from './McpPanel.svelte';
+  import ContextualBar from './ContextualBar.svelte';
+  import InspectorPanel from './InspectorPanel.svelte';
 
   let {
     project = null,
@@ -23,7 +26,8 @@
 
   let activeTool = $state('layers');
   let drawerOpen = $state(true);
-  let selectedLayerId = $state(null);
+  let selectedLayerIds = $state([]);
+  let selectedLayerId = $derived(selectedLayerIds[0] ?? null);
   let isProcessing = $state(false);
   let statusMsg = $state('Ready');
   let errorMsg = $state('');
@@ -31,6 +35,13 @@
   let zoom = $state(1.0);
   let canvasArea;
   let textInputEl;
+
+  // ── Phase 2: Grid, Rulers, Guides & Clipboard ────────────────────────────
+  let showGrid = $state(false);
+  let showRulers = $state(true);
+  let guides = $state([]); // { id, axis: 'h'|'v', pos: number }
+  let clipboardLayers = $state([]);
+  let groups = $derived(project?.groups ?? []);
 
   // ── Crop State ───────────────────────────────────────────────────────────
   let cropAspect = $state(null);
@@ -51,10 +62,11 @@
   let zoomPct = $derived(Math.round(zoom * 100));
 
   $effect(() => {
-    if (layers.length > 0 && (!selectedLayerId || !layers.some((l) => l.id === selectedLayerId))) {
-      selectedLayerId = layers[layers.length - 1].id;
-    } else if (layers.length === 0) {
-      selectedLayerId = null;
+    const validIds = selectedLayerIds.filter((id) => layers.some((l) => l.id === id));
+    if (layers.length > 0 && validIds.length === 0 && selectedLayerIds.length === 0) {
+      // Keep empty if user explicitly deselected, only auto-select on initial load if needed
+    } else if (validIds.length !== selectedLayerIds.length) {
+      selectedLayerIds = validIds;
     }
   });
 
@@ -187,7 +199,7 @@
       },
       'Add Gradient Layer'
     );
-    if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
+    if (resp?.layers?.length) selectedLayerIds = [resp.layers[resp.layers.length - 1].id];
   }
 
   async function addWatermark() {
@@ -202,7 +214,7 @@
       },
       'Add Watermark'
     );
-    if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
+    if (resp?.layers?.length) selectedLayerIds = [resp.layers[resp.layers.length - 1].id];
   }
 
   // ── Persistent User Elements Library (%APPDATA%) ─────────────────────────
@@ -246,7 +258,7 @@
         await loadUserLibrary();
         if (hasProject) {
           const resp = await runCmd('add_image_overlay_layer', { imagePath: saved.path, x: 40, y: 40, scale: 1.0 }, 'Add Element');
-          if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
+          if (resp?.layers?.length) selectedLayerIds = [resp.layers[resp.layers.length - 1].id];
         }
       } catch (e) {
         errorMsg = String(e);
@@ -257,7 +269,7 @@
   async function addLibraryItemToCanvas(item) {
     if (!hasProject || isProcessing) return;
     const resp = await runCmd('add_image_overlay_layer', { imagePath: item.path, x: 40, y: 40, scale: 1.0 }, `Add ${item.name}`);
-    if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
+    if (resp?.layers?.length) selectedLayerIds = [resp.layers[resp.layers.length - 1].id];
   }
 
   async function deleteLibraryItem(e, id) {
@@ -287,17 +299,216 @@
       },
       'Add Text'
     );
-    if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
+    if (resp?.layers?.length) selectedLayerIds = [resp.layers[resp.layers.length - 1].id];
   }
 
   // ── Rail & Presets ───────────────────────────────────────────────────────
+  // ── Brand Kit & Live Debounced Updates ───────────────────────────────────
+  let brandColors = $state(['#38BDF8', '#6366F1', '#EC4899', '#10B981', '#F59E0B']);
+  let recentColors = $state(['#FFFFFF', '#000000']);
+  let liveTimer = null;
+  let lastFitKey = '';
+
+  async function loadBrandKit() {
+    try {
+      const kit = await invoke('get_brand_kit');
+      if (kit?.colors) brandColors = kit.colors;
+      if (kit?.recent_colors) recentColors = kit.recent_colors;
+    } catch (e) {
+      console.error('loadBrandKit:', e);
+    }
+  }
+
+  $effect(() => {
+    loadBrandKit();
+  });
+
+  $effect(() => {
+    if (hasProject) {
+      const key = `${canvasW}x${canvasH}`;
+      if (key !== lastFitKey && canvasArea) {
+        lastFitKey = key;
+        fitToScreen();
+      }
+    }
+  });
+
+  function trackRecentColor(hex) {
+    if (!hex) return;
+    const norm = hex.toUpperCase();
+    recentColors = [norm, ...recentColors.filter((c) => c !== norm)].slice(0, 8);
+    invoke('save_brand_kit', { colors: brandColors, recentColors }).catch(console.error);
+  }
+
+  function saveBrandColor(hex) {
+    const norm = hex.toUpperCase();
+    if (!brandColors.includes(norm)) {
+      brandColors = [...brandColors, norm];
+      invoke('save_brand_kit', { colors: brandColors, recentColors }).catch(console.error);
+    }
+  }
+
+  function removeBrandColor(hex) {
+    brandColors = brandColors.filter((c) => c !== hex);
+    invoke('save_brand_kit', { colors: brandColors, recentColors }).catch(console.error);
+  }
+
+  function pushCheckpoint() {
+    if (hasProject) invoke('push_undo_checkpoint').catch(console.error);
+  }
+
+  function scheduleLive(fn, immediate = false) {
+    clearTimeout(liveTimer);
+    if (immediate) {
+      fn();
+    } else {
+      liveTimer = setTimeout(fn, 60);
+    }
+  }
+
+  function liveUpdateTransform(patch, recordUndo = false) {
+    if (!selectedLayer || selectedLayer.locked) return;
+    const l = selectedLayer;
+    scheduleLive(async () => {
+      try {
+        const resp = await invoke('update_layer_transform', {
+          layerId: l.id,
+          x: patch.x ?? l.x,
+          y: patch.y ?? l.y,
+          scale: patch.scale ?? l.scale,
+          rotation: patch.rotation ?? l.rotation,
+          opacity: patch.opacity ?? l.opacity,
+          blendMode: patch.blend_mode ?? l.blend_mode,
+          recordUndo,
+        });
+        onProjectUpdate(resp);
+      } catch (e) {
+        errorMsg = String(e);
+      }
+    }, recordUndo);
+  }
+
+  function liveUpdateText(patch, recordUndo = false) {
+    if (!selectedLayer || selectedLayer.kind?.type !== 'Text3D') return;
+    const l = selectedLayer;
+    const k = l.kind;
+    if (patch.color_hex) trackRecentColor(patch.color_hex);
+    if (patch.stroke_hex) trackRecentColor(patch.stroke_hex);
+    scheduleLive(async () => {
+      try {
+        const resp = await invoke('update_text_layer', {
+          layerId: l.id,
+          content: patch.content ?? k.content,
+          fontStyle: patch.font_style ?? k.font_style,
+          size: Number(patch.size ?? k.size),
+          colorHex: patch.color_hex ?? rgbaToHex(k.color),
+          depth3d: Number(patch.depth_3d ?? k.depth),
+          strokeHex: patch.stroke_hex ?? rgbaToHex(k.stroke_color),
+          strokeWidth: Number(patch.stroke_width ?? k.stroke_width),
+          bold: patch.bold ?? k.bold ?? false,
+          italic: patch.italic ?? k.italic ?? false,
+          align: patch.align ?? k.align ?? 'left',
+          lineHeight: Number(patch.line_height ?? k.line_height ?? 1.2),
+          letterSpacing: Number(patch.letter_spacing ?? k.letter_spacing ?? 0),
+          recordUndo,
+        });
+        onProjectUpdate(resp);
+      } catch (e) {
+        errorMsg = String(e);
+      }
+    }, recordUndo);
+  }
+
+  function liveUpdateShape(patch, recordUndo = false) {
+    if (!selectedLayer || selectedLayer.kind?.type !== 'Shape') return;
+    const l = selectedLayer;
+    const k = l.kind;
+    if (patch.fill_hex) trackRecentColor(patch.fill_hex);
+    if (patch.border_hex) trackRecentColor(patch.border_hex);
+    scheduleLive(async () => {
+      try {
+        const resp = await invoke('update_shape_layer', {
+          layerId: l.id,
+          width: Number(patch.width ?? k.width),
+          height: Number(patch.height ?? k.height),
+          fillHex: patch.fill_hex ?? rgbaToHex(k.fill_color),
+          borderRadius: Number(patch.border_radius ?? k.border_radius),
+          borderHex: patch.border_hex ?? rgbaToHex(k.border_color ?? [255, 255, 255, 255]),
+          borderWidth: Number(patch.border_width ?? k.border_width ?? 0),
+          recordUndo,
+        });
+        onProjectUpdate(resp);
+      } catch (e) {
+        errorMsg = String(e);
+      }
+    }, recordUndo);
+  }
+
+  function liveUpdateEffects(patch, recordUndo = false) {
+    if (!selectedLayer) return;
+    const l = selectedLayer;
+    const fx = l.effects;
+    scheduleLive(async () => {
+      try {
+        const resp = await invoke('update_layer_effects', {
+          layerId: l.id,
+          brightness: Number(patch.brightness ?? fx.brightness),
+          contrast: Number(patch.contrast ?? fx.contrast),
+          saturation: Number(patch.saturation ?? fx.saturation),
+          blur: Number(patch.blur ?? fx.blur),
+          filter: patch.filter ?? fx.filter,
+          recordUndo,
+        });
+        onProjectUpdate(resp);
+      } catch (e) {
+        errorMsg = String(e);
+      }
+    }, recordUndo);
+  }
+
+  function liveUpdateOutline(patch, recordUndo = false) {
+    if (!selectedLayer) return;
+    const l = selectedLayer;
+    const o = l.outline;
+    if (patch.color_hex) trackRecentColor(patch.color_hex);
+    scheduleLive(async () => {
+      try {
+        const resp = await invoke('set_layer_outline', {
+          layerId: l.id,
+          enabled: patch.enabled ?? o.enabled,
+          colorHex: patch.color_hex ?? rgbaToHex(o.color),
+          thickness: Number(patch.thickness ?? o.thickness),
+          recordUndo,
+        });
+        onProjectUpdate(resp);
+      } catch (e) {
+        errorMsg = String(e);
+      }
+    }, recordUndo);
+  }
+
+  async function replaceImageLayer(layerId) {
+    const sel = await open({
+      multiple: false,
+      title: 'Replace Image Layer',
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] }],
+    });
+    if (typeof sel === 'string' && sel) {
+      await runCmd('replace_image_layer', { layerId, imagePath: sel }, 'Replace Image');
+    }
+  }
+
+  function quickRemoveBg(layerId) {
+    selectedLayerIds = [layerId];
+    activeTool = 'elements';
+    drawerOpen = true;
+  }
+
   const tools = [
     { id: 'layers',     label: 'Layers',    Icon: Layers },
     { id: 'elements',   label: 'Elements',  Icon: Shapes },
     { id: 'text',       label: 'Text',      Icon: Type },
     { id: 'background', label: 'BG',        Icon: Palette },
-    { id: 'adjust',     label: 'Adjust',    Icon: SlidersHorizontal },
-    { id: 'outline',    label: 'Outline',   Icon: Sparkles },
     { id: 'crop',       label: 'Crop',      Icon: Crop },
     { id: 'mcp',        label: 'MCP AI',    Icon: Bot },
   ];
@@ -392,15 +603,122 @@
   }
 
   function handleKeydown(e) {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+    const tag = e.target?.tagName;
+    const inInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      if (inInput) return;
       e.preventDefault();
       if (project?.can_undo) runCmd('undo_action', {}, 'Undo');
     }
-    if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+      if (inInput) return;
       e.preventDefault();
       if (project?.can_redo) runCmd('redo_action', {}, 'Redo');
     }
+    if (!inInput && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
+      const sel = layers.filter((l) => selectedLayerIds.includes(l.id));
+      if (sel.length > 0) {
+        clipboardLayers = sel;
+        statusMsg = `Copied ${sel.length} layer(s)`;
+      }
+    }
+    if (!inInput && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'x') {
+      const sel = layers.filter((l) => selectedLayerIds.includes(l.id));
+      if (sel.length > 0) {
+        clipboardLayers = sel;
+        runCmd('delete_layers', { layerIds: selectedLayerIds }, 'Cut Layers');
+      }
+    }
+    if (!inInput && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+      if (clipboardLayers.length > 0 && hasProject) {
+        e.preventDefault();
+        runCmd('paste_layers_from_json', { layersJson: JSON.stringify(clipboardLayers) }, 'Paste Layers');
+      }
+    }
     if (e.key === 'Escape') showExportModal = false;
+  }
+
+  function handlePaste(e) {
+    if (!hasProject) return;
+    const tag = e.target?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) {
+          e.preventDefault();
+          const reader = new FileReader();
+          reader.onload = () => {
+            if (typeof reader.result === 'string') {
+              runCmd('add_image_bytes_layer', {
+                filename: file.name || 'clipboard.png',
+                dataBase64: reader.result,
+                x: 60,
+                y: 60,
+              }, 'Paste Image');
+            }
+          };
+          reader.readAsDataURL(file);
+          return;
+        }
+      }
+    }
+  }
+
+  function handleDrop(e) {
+    e.preventDefault();
+    if (!hasProject) return;
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    for (const file of files) {
+      if (file.type.startsWith('image/') || /\.(png|jpe?g|webp|bmp)$/i.test(file.name)) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          if (typeof reader.result === 'string') {
+            runCmd('add_image_bytes_layer', {
+              filename: file.name,
+              dataBase64: reader.result,
+              x: 60,
+              y: 60,
+            }, `Drop ${file.name}`);
+          }
+        };
+        reader.readAsDataURL(file);
+      }
+    }
+  }
+
+  function addGuide(axis, pos) {
+    guides = [...guides, { id: `g-${Date.now()}-${Math.random()}`, axis, pos: Math.max(0, Math.round(pos)) }];
+  }
+
+  function toggleLayerSelect(e, id) {
+    if (e.shiftKey) {
+      selectedLayerIds = selectedLayerIds.includes(id)
+        ? selectedLayerIds.filter((x) => x !== id)
+        : [...selectedLayerIds, id];
+    } else {
+      selectedLayerIds = [id];
+    }
+  }
+
+  function selectGroupLayers(groupId) {
+    const ids = layers.filter((l) => l.group_id === groupId).map((l) => l.id);
+    if (ids.length > 0) selectedLayerIds = ids;
+  }
+
+  function groupSelected() {
+    if (selectedLayerIds.length < 1) return;
+    runCmd('group_layers', { layerIds: selectedLayerIds, name: null, parentGroupId: null }, 'Group Layers');
+  }
+
+  function ungroupSelected() {
+    const first = layers.find((l) => selectedLayerIds.includes(l.id) && l.group_id);
+    if (first?.group_id) {
+      runCmd('ungroup_layers', { groupId: first.group_id }, 'Ungroup');
+    }
   }
 
   async function saveVeltraxProject() {
@@ -431,7 +749,7 @@
     });
     if (typeof sel === 'string' && sel) {
       const resp = await runCmd('add_image_overlay_layer', { imagePath: sel, x: 40, y: 40, scale: 1.0 }, 'Add Overlay');
-      if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
+      if (resp?.layers?.length) selectedLayerIds = [resp.layers[resp.layers.length - 1].id];
     }
   }
 
@@ -451,7 +769,7 @@
       },
       `Add ${shapeType}`
     );
-    if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
+    if (resp?.layers?.length) selectedLayerIds = [resp.layers[resp.layers.length - 1].id];
   }
 
   async function addNewTextLayer() {
@@ -470,7 +788,7 @@
       },
       'Add Text'
     );
-    if (resp?.layers?.length) selectedLayerId = resp.layers[resp.layers.length - 1].id;
+    if (resp?.layers?.length) selectedLayerIds = [resp.layers[resp.layers.length - 1].id];
   }
 
   async function updateSelectedTextLayer() {
@@ -492,7 +810,7 @@
   }
 
   function handleDoubleClickText(layer) {
-    selectedLayerId = layer.id;
+    selectedLayerIds = [layer.id];
     activeTool = 'text';
     drawerOpen = true;
     setTimeout(() => textInputEl?.focus(), 60);
@@ -589,7 +907,7 @@
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} onpaste={handlePaste} />
 
 <div class="editor-shell">
   <header class="top-bar">
@@ -652,6 +970,38 @@
           <!-- ══ LAYERS ══ -->
           {#if activeTool === 'layers'}
             <div class="panel">
+              {#if selectedLayerIds.length > 0}
+                <div class="btn-grid-2">
+                  <button class="btn-ghost" onclick={groupSelected} title="Group selected (Ctrl+G)">
+                    <FolderPlus size={12} /> Group ({selectedLayerIds.length})
+                  </button>
+                  <button class="btn-ghost" onclick={ungroupSelected} title="Ungroup (Ctrl+Shift+G)">
+                    <Ungroup size={12} /> Ungroup
+                  </button>
+                </div>
+              {/if}
+
+              {#if groups.length > 0}
+                <div class="group-list">
+                  {#each groups as grp}
+                    <div class="group-row" onclick={() => selectGroupLayers(grp.id)} role="button" tabindex="0">
+                      <span class="group-name">{grp.name}</span>
+                      <div class="layer-actions" onclick={(e) => e.stopPropagation()} role="presentation">
+                        <button class="mini-btn" onclick={() => runCmd('toggle_group_visibility', { groupId: grp.id }, 'Group Visibility')} title="Toggle Group Visibility">
+                          {#if grp.visible}<Eye size={12} />{:else}<EyeOff size={12} />{/if}
+                        </button>
+                        <button class="mini-btn" onclick={() => runCmd('toggle_group_lock', { groupId: grp.id }, 'Group Lock')} title="Toggle Group Lock">
+                          {#if grp.locked}<Lock size={12} />{:else}<Unlock size={12} />{/if}
+                        </button>
+                        <button class="mini-btn danger" onclick={() => runCmd('ungroup_layers', { groupId: grp.id }, 'Ungroup')} title="Ungroup">
+                          <Ungroup size={12} />
+                        </button>
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+
               {#if layers.length === 0}
                 <p class="panel-note">No layers yet. Add an image overlay, text, or shape from the left rail.</p>
               {:else}
@@ -660,12 +1010,14 @@
                     {@const realIdx = layers.length - 1 - revIdx}
                     <div
                       class="layer-item"
-                      class:selected={l.id === selectedLayerId}
-                      onclick={() => (selectedLayerId = l.id)}
+                      class:selected={selectedLayerIds.includes(l.id)}
+                      onclick={(e) => toggleLayerSelect(e, l.id)}
                       role="button"
                       tabindex="0"
                     >
-                      <span class="layer-name">{l.name}</span>
+                      <span class="layer-name">
+                        {#if l.group_id}<span class="grp-tag">G</span>{/if}{l.name}
+                      </span>
                       <div class="layer-actions" onclick={(e) => e.stopPropagation()} role="presentation">
                         <button class="mini-btn" onclick={() => runCmd('reorder_layer', { layerId: l.id, newIndex: realIdx + 1 }, 'Move Up')} disabled={realIdx === layers.length - 1} title="Move Up"><ArrowUp size={12} /></button>
                         <button class="mini-btn" onclick={() => runCmd('reorder_layer', { layerId: l.id, newIndex: Math.max(0, realIdx - 1) }, 'Move Down')} disabled={realIdx === 0} title="Move Down"><ArrowDown size={12} /></button>
@@ -903,12 +1255,6 @@
                 {/each}
               </div>
 
-              {#if isEditingText}
-                <button class="btn-primary fw" onclick={updateSelectedTextLayer} disabled={isProcessing || !textContent.trim()}>
-                  Update Text Layer
-                </button>
-              {/if}
-
               <div class="btn-grid-2">
                 <button class="btn-ghost" onclick={() => (textX = Math.max(0, Math.round(canvasW * 0.25)))}>
                   <AlignCenterHorizontal size={12} /> Center H
@@ -917,10 +1263,7 @@
                   <AlignCenterVertical size={12} /> Center V
                 </button>
               </div>
-
-              <button class="btn-ghost fw" onclick={addNewTextLayer} disabled={!hasProject || isProcessing || !textContent.trim()}>
-                + Add New Text Layer
-              </button>
+              <p class="panel-note">Select any text on the canvas to edit it live in the right Inspector or top bar.</p>
             </div>
 
           <!-- ══ BACKGROUND ══ -->
@@ -1100,46 +1443,107 @@
       </button>
     </div>
 
-    <!-- ── Interactive Canvas + Gizmo ─────────────────────────────────────── -->
-    <div
-      class="canvas-area"
-      bind:this={canvasArea}
-      use:wheelZoom
-      onpointerdown={(e) => {
-        if (!cropMode && e.target === canvasArea) selectedLayerId = null;
-      }}
-      role="presentation"
-    >
-      {#if hasProject}
-        <div
-          class="canvas-frame"
-          class:transparent-checker={transparentBg}
-          style="width:{canvasW * zoom}px; height:{canvasH * zoom}px;"
-        >
-          <img
-            src={previewUrl}
-            alt="Veltrax Studios Canvas"
-            width={canvasW * zoom}
-            height={canvasH * zoom}
-            style="display:block; width:100%; height:100%; object-fit:fill; pointer-events:none;"
-            onload={fitToScreen}
-            draggable="false"
-          />
+    <!-- ── Center Workspace (Contextual Bar + Canvas) ─────────────────────── -->
+    <div class="center-col">
+      <ContextualBar
+        {hasProject}
+        {selectedLayer}
+        {selectedLayerIds}
+        {canvasW}
+        {canvasH}
+        {brandColors}
+        {recentColors}
+        {fontStyles}
+        onSaveBrandColor={saveBrandColor}
+        onRemoveBrandColor={removeBrandColor}
+        onCheckpoint={pushCheckpoint}
+        onLiveTransform={liveUpdateTransform}
+        onLiveText={liveUpdateText}
+        onLiveShape={liveUpdateShape}
+        onFlip={(id, horizontal) => runCmd('flip_layer', { layerId: id, horizontal }, horizontal ? 'Flip H' : 'Flip V')}
+        onReplaceImage={replaceImageLayer}
+        onQuickRemoveBg={quickRemoveBg}
+        onDelete={(id) => runCmd('delete_layer', { layerId: id }, 'Delete Layer')}
+        onDuplicate={(id) => runCmd('duplicate_layer', { layerId: id }, 'Duplicate Layer')}
+        onDeleteMulti={(ids) => runCmd('delete_layers', { layerIds: ids }, 'Delete Selected')}
+        onDuplicateMulti={(ids) => runCmd('duplicate_layers', { layerIds: ids }, 'Duplicate Selected')}
+        onGroup={groupSelected}
+        onAlign={(alignment) => runCmd('align_layers', { layerIds: selectedLayerIds, alignment }, `Align ${alignment}`)}
+        onDistribute={(axis) => runCmd('distribute_layers', { layerIds: selectedLayerIds, axis }, `Distribute ${axis}`)}
+        onFitScreen={fitToScreen}
+        onQuickCanvasBg={(hex) => { trackRecentColor(hex); runCmd('set_canvas_background', { colorHex: hex }, 'Set BG'); }}
+      />
+
+      <div
+        class="canvas-area"
+        bind:this={canvasArea}
+        use:wheelZoom
+        ondragover={(e) => e.preventDefault()}
+        ondrop={handleDrop}
+        onpointerdown={(e) => {
+          if (!cropMode && e.target === canvasArea) selectedLayerIds = [];
+        }}
+        role="presentation"
+      >
+        {#if showRulers && hasProject}
+          <div
+            class="ruler top"
+            onclick={(e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              addGuide('v', (e.clientX - r.left) / zoom);
+            }}
+            title="Click to add vertical guide"
+            role="presentation"
+          >
+            <span>Ruler · Click to add vertical guide</span>
+          </div>
+          <div
+            class="ruler left"
+            onclick={(e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              addGuide('h', (e.clientY - r.top) / zoom);
+            }}
+            title="Click to add horizontal guide"
+            role="presentation"
+          ></div>
+        {/if}
+
+        {#if hasProject}
+          <div
+            class="canvas-frame"
+            class:transparent-checker={transparentBg}
+            style="width:{canvasW * zoom}px; height:{canvasH * zoom}px;"
+          >
+            <img
+              src={previewUrl}
+              alt="Veltrax Studios Canvas"
+              width={canvasW * zoom}
+              height={canvasH * zoom}
+              style="display:block; width:100%; height:100%; object-fit:fill; pointer-events:none;"
+              draggable="false"
+            />
 
           <CanvasGizmo
             {layers}
-            {selectedLayerId}
+            {selectedLayerIds}
             {canvasW}
             {canvasH}
             {zoom}
             {cropMode}
             {cropRect}
             {cropAspect}
-            onSelectLayer={(id) => (selectedLayerId = id)}
+            {showGrid}
+            {guides}
+            onSelectLayers={(ids) => (selectedLayerIds = ids)}
             onDoubleClickText={handleDoubleClickText}
             onCommitTransform={commitGizmoTransform}
-            onDeleteLayer={(id) => runCmd('delete_layer', { layerId: id }, 'Delete Layer')}
-            onDuplicateLayer={(id) => runCmd('duplicate_layer', { layerId: id }, 'Duplicate Layer')}
+            onCommitMultiTransform={(updates) => runCmd('transform_layers', { updates }, 'Transform Layers')}
+            onDeleteLayers={(ids) => runCmd('delete_layers', { layerIds: ids }, 'Delete Layers')}
+            onDuplicateLayers={(ids) => runCmd('duplicate_layers', { layerIds: ids }, 'Duplicate Layers')}
+            onGroupSelected={groupSelected}
+            onUngroupSelected={ungroupSelected}
+            onRemoveGuide={(id) => (guides = guides.filter((g) => g.id !== id))}
+            onUpdateGuide={(id, pos) => (guides = guides.map((g) => (g.id === id ? { ...g, pos } : g)))}
             onCropRectChange={(r) => (cropRect = r)}
           />
 
@@ -1161,20 +1565,44 @@
           {layers.length} layers · {project?.undo_count ?? 0} undo
           {#if errorMsg}<span class="err-dot" title={errorMsg}>!</span>{:else}· {statusMsg}{/if}
         </span>
-        <div class="zoom-controls">
-          <button class="zoom-btn" onclick={() => (zoom = Math.max(0.05, zoom - 0.1))}>−</button>
-          <input
-            type="range" min="10" max="300" step="1"
-            value={zoomPct}
-            oninput={(e) => (zoom = Number(e.currentTarget.value) / 100)}
-            style="width:90px;"
-          />
-          <span class="zoom-pct">{zoomPct}%</span>
-          <button class="zoom-btn" onclick={() => (zoom = Math.min(3.0, zoom + 0.1))}>+</button>
-          <button class="zoom-btn" onclick={fitToScreen} title="Fit to screen"><Maximize2 size={11} strokeWidth={2} /></button>
+          <div class="zoom-controls">
+            <button class="zoom-btn" onclick={() => (zoom = Math.max(0.05, zoom - 0.1))}>−</button>
+            <input
+              type="range" min="10" max="300" step="1"
+              value={zoomPct}
+              oninput={(e) => (zoom = Number(e.currentTarget.value) / 100)}
+              style="width:90px;"
+            />
+            <span class="zoom-pct">{zoomPct}%</span>
+            <button class="zoom-btn" onclick={() => (zoom = Math.min(3.0, zoom + 0.1))}>+</button>
+            <button class="zoom-btn" onclick={fitToScreen} title="Fit to screen"><Maximize2 size={11} strokeWidth={2} /></button>
+            <button class="zoom-btn" class:active-toggle={showGrid} onclick={() => (showGrid = !showGrid)} title="Toggle Grid"><Grid3x3 size={11} strokeWidth={2} /></button>
+            <button class="zoom-btn" class:active-toggle={showRulers} onclick={() => (showRulers = !showRulers)} title="Toggle Rulers &amp; Guides"><Ruler size={11} strokeWidth={2} /></button>
+          </div>
         </div>
       </div>
     </div>
+
+    <InspectorPanel
+      {hasProject}
+      {project}
+      {selectedLayer}
+      {fontStyles}
+      {filters}
+      {brandColors}
+      {recentColors}
+      onSaveBrandColor={saveBrandColor}
+      onRemoveBrandColor={removeBrandColor}
+      onCheckpoint={pushCheckpoint}
+      onLiveTransform={liveUpdateTransform}
+      onLiveText={liveUpdateText}
+      onLiveShape={liveUpdateShape}
+      onLiveEffects={liveUpdateEffects}
+      onLiveOutline={liveUpdateOutline}
+      onFlip={(id, horizontal) => runCmd('flip_layer', { layerId: id, horizontal }, horizontal ? 'Flip H' : 'Flip V')}
+      onResizeCanvas={(w, h) => runCmd('resize_canvas', { width: w, height: h, scaleLayers: true }, 'Resize Canvas')}
+      onSetCanvasBg={(opts) => runCmd('set_canvas_background', opts, 'Set Canvas BG')}
+    />
   </div>
 
   <ExportModal
@@ -1278,6 +1706,16 @@
   .tier-h2 { font-size:14px; font-weight:600; }
   .tier-body { font-size:12px; font-weight:400; color:var(--text-secondary); }
 
+  .group-list { display:flex; flex-direction:column; gap:4px; }
+  .group-row { display:flex; align-items:center; justify-content:space-between; padding:6px 8px; border-radius:var(--r-sm); background:rgba(56,189,248,0.08); border:1px solid rgba(56,189,248,0.25); cursor:pointer; }
+  .group-name { font-size:11px; font-weight:700; color:#38bdf8; }
+  .grp-tag { display:inline-block; font-size:9px; font-weight:700; background:rgba(56,189,248,0.2); color:#38bdf8; padding:0 4px; border-radius:3px; margin-right:5px; }
+
+  .ruler { position:absolute; background:var(--bg-sidebar); border:1px solid var(--border); z-index:45; display:flex; align-items:center; justify-content:center; font-size:9px; color:var(--text-muted); cursor:crosshair; }
+  .ruler.top { top:0; left:18px; right:0; height:18px; }
+  .ruler.left { top:18px; left:0; bottom:0; width:18px; }
+  .zoom-btn.active-toggle { border-color:#38bdf8; color:#38bdf8; background:rgba(56,189,248,0.16); }
+
   .checkbox-row { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text-primary); cursor:pointer; }
   .checkbox-row input { width:auto; accent-color:var(--accent); }
 
@@ -1290,6 +1728,7 @@
   .restart-note { font-size:11px; color:#fbbf24; }
   .connect-result { font-size:11px; color:#34d399; line-height:1.5; white-space:pre-wrap; }
 
+  .center-col { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
   .canvas-area { flex:1; min-width:0; min-height:0; position:relative; overflow:auto; display:flex; align-items:center; justify-content:center; }
   .canvas-frame { position:relative; flex-shrink:0; border-radius:4px; overflow:visible; box-shadow:0 0 0 1px rgba(255,255,255,0.08),0 24px 60px rgba(0,0,0,0.6); }
   .canvas-frame.transparent-checker {

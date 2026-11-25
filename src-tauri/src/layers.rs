@@ -44,6 +44,56 @@ impl Default for LayerOutline {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DropShadow {
+    pub enabled: bool,
+    pub color: [u8; 4],
+    pub blur: f32,
+    pub distance: f32,
+    pub angle: f32,
+    pub opacity: f32,
+}
+
+impl Default for DropShadow {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            color: [0, 0, 0, 255],
+            blur: 8.0,
+            distance: 10.0,
+            angle: 135.0,
+            opacity: 0.65,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GlowEffect {
+    pub enabled: bool,
+    pub color: [u8; 4],
+    pub intensity: f32, // radius/strength 1..30
+}
+
+impl Default for GlowEffect {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            color: [56, 189, 248, 255],
+            intensity: 10.0,
+        }
+    }
+}
+
+fn default_align() -> String {
+    "left".to_string()
+}
+fn default_line_height() -> f32 {
+    1.2
+}
+fn default_sides() -> u32 {
+    5
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum LayerKind {
     Image {
@@ -60,9 +110,27 @@ pub enum LayerKind {
         stroke_color: [u8; 4],
         stroke_width: u32,
         size: f32,
+        #[serde(default)]
+        bold: bool,
+        #[serde(default)]
+        italic: bool,
+        #[serde(default = "default_align")]
+        align: String,
+        #[serde(default = "default_line_height")]
+        line_height: f32,
+        #[serde(default)]
+        letter_spacing: f32,
+        #[serde(default)]
+        underline: bool,
+        #[serde(default)]
+        gradient_colors: Option<[[u8; 4]; 2]>,
+        #[serde(default)]
+        gradient_angle: f32,
+        #[serde(default)]
+        curve_amount: f32,
     },
     Shape {
-        shape_type: String, // "rectangle" | "circle" | "badge"
+        shape_type: String, // "rectangle" | "circle" | "badge" | "line" | "arrow" | "triangle" | "star" | "polygon"
         width: u32,
         height: u32,
         fill_color: [u8; 4],
@@ -71,6 +139,12 @@ pub enum LayerKind {
         border_color: [u8; 4],
         #[serde(default)]
         border_width: u32,
+        #[serde(default = "default_sides")]
+        sides: u32,
+        #[serde(default)]
+        corner_radii: Option<[u32; 4]>,
+        #[serde(default)]
+        fill_gradient: Option<BgGradient>,
     },
     Gradient {
         width: u32,
@@ -111,9 +185,35 @@ pub struct Layer {
     pub bounds_width: u32,
     #[serde(default)]
     pub bounds_height: u32,
+    #[serde(default)]
+    pub group_id: Option<String>,
     pub effects: LayerEffects,
     pub outline: LayerOutline,
+    #[serde(default)]
+    pub shadow: DropShadow,
+    #[serde(default)]
+    pub outer_glow: GlowEffect,
+    #[serde(default)]
+    pub inner_glow: GlowEffect,
+    #[serde(default)]
+    pub clip_to_below: bool,
+    #[serde(default)]
+    pub mask_shape: Option<String>, // None | "circle" | "rounded" | "star"
+    #[serde(default)]
+    pub mask_radius: u32,
     pub kind: LayerKind,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LayerGroup {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub parent_group_id: Option<String>,
+    pub visible: bool,
+    pub locked: bool,
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -126,6 +226,8 @@ pub struct ProjectSnapshot {
     #[serde(default)]
     pub bg_gradient: Option<BgGradient>,
     pub layers: Vec<Layer>,
+    #[serde(default)]
+    pub groups: Vec<LayerGroup>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -145,6 +247,7 @@ impl Default for ProjectSnapshot {
             bg_color: [255, 255, 255, 255],
             bg_gradient: None,
             layers: Vec::new(),
+            groups: Vec::new(),
         }
     }
 }
@@ -185,6 +288,7 @@ pub struct ProjectResponse {
     pub bg_color: [u8; 4],
     pub bg_gradient: Option<BgGradient>,
     pub layers: Vec<Layer>,
+    pub groups: Vec<LayerGroup>,
     pub can_undo: bool,
     pub can_redo: bool,
     pub undo_count: usize,
@@ -215,6 +319,7 @@ impl ProjectState {
             bg_color: self.current.bg_color,
             bg_gradient: self.current.bg_gradient.clone(),
             layers: self.current.layers.clone(),
+            groups: self.current.groups.clone(),
             can_undo: !self.undo_stack.is_empty(),
             can_redo: !self.redo_stack.is_empty(),
             undo_count: self.undo_stack.len(),
@@ -242,6 +347,26 @@ pub fn parse_hex_color(hex: &str) -> [u8; 4] {
 }
 
 fn load_font_bytes(style: &str) -> Result<Vec<u8>, String> {
+    // 1. Check imported custom fonts in %APPDATA%\Veltrax Studios\fonts\
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let custom_dir = std::path::Path::new(&appdata).join("Veltrax Studios").join("fonts");
+        let custom_path = custom_dir.join(style);
+        if custom_path.is_file() {
+            if let Ok(data) = std::fs::read(&custom_path) {
+                return Ok(data);
+            }
+        }
+    }
+    // 2. Check direct system font filename in C:\Windows\Fonts\
+    if style.to_lowercase().ends_with(".ttf") || style.to_lowercase().ends_with(".otf") {
+        let win_font = std::path::Path::new(r"C:\Windows\Fonts").join(style);
+        if win_font.is_file() {
+            if let Ok(data) = std::fs::read(&win_font) {
+                return Ok(data);
+            }
+        }
+    }
+    // 3. Built-in style presets
     let candidates: &[&str] = match style {
         "classic_serif" => &[
             r"C:\Windows\Fonts\times.ttf",
@@ -284,6 +409,26 @@ fn load_font_bytes(style: &str) -> Result<Vec<u8>, String> {
 
 // ── Layer Rendering & Compositing ───────────────────────────────────────────
 
+fn is_group_visible(group_id: Option<&str>, groups: &[LayerGroup]) -> bool {
+    let mut cur = group_id;
+    let mut guard = 0;
+    while let Some(gid) = cur {
+        guard += 1;
+        if guard > 32 {
+            break;
+        }
+        if let Some(g) = groups.iter().find(|gr| gr.id == gid) {
+            if !g.visible {
+                return false;
+            }
+            cur = g.parent_group_id.as_deref();
+        } else {
+            break;
+        }
+    }
+    true
+}
+
 pub fn render_project_composite(
     snapshot: &mut ProjectSnapshot,
     dest_path: &str,
@@ -300,6 +445,9 @@ pub fn render_project_composite(
         RgbaImage::from_pixel(cw, ch, Rgba(snapshot.bg_color))
     };
 
+    let groups_ref = snapshot.groups.clone();
+    let mut prev_canvas_alpha: Option<Vec<u8>> = None;
+
     for layer in &mut snapshot.layers {
         let Ok(mut layer_img) = render_layer_kind(&layer.kind) else {
             continue;
@@ -307,8 +455,12 @@ pub fn render_project_composite(
         layer.bounds_width = layer_img.width();
         layer.bounds_height = layer_img.height();
 
-        if !layer.visible || layer.opacity <= 0.001 {
+        if !layer.visible || !is_group_visible(layer.group_id.as_deref(), &groups_ref) || layer.opacity <= 0.001 {
             continue;
+        }
+
+        if let Some(ref mask_kind) = layer.mask_shape {
+            layer_img = apply_shape_mask(&layer_img, mask_kind, layer.mask_radius);
         }
 
         layer_img = apply_layer_effects(layer_img, &layer.effects);
@@ -332,15 +484,72 @@ pub fn render_project_composite(
             layer_img = image::imageops::flip_vertical(&layer_img);
         }
 
-        if layer.outline.enabled && layer.outline.thickness > 0 {
-            layer_img = apply_outline(&layer_img, layer.outline.color, layer.outline.thickness);
+        if layer.inner_glow.enabled && layer.inner_glow.intensity > 0.5 {
+            layer_img = apply_inner_glow(&layer_img, layer.inner_glow.color, layer.inner_glow.intensity);
         }
+
+        let mut draw_x = layer.x;
+        let mut draw_y = layer.y;
+
+        if layer.outline.enabled && layer.outline.thickness > 0 {
+            let t = layer.outline.thickness.min(24) as i64;
+            layer_img = apply_outline(&layer_img, layer.outline.color, layer.outline.thickness);
+            draw_x -= t;
+            draw_y -= t;
+        }
+
+        if layer.outer_glow.enabled && layer.outer_glow.intensity > 0.5 {
+            let pad = (layer.outer_glow.intensity.ceil() as i64).min(40);
+            layer_img = apply_outer_glow(&layer_img, layer.outer_glow.color, layer.outer_glow.intensity);
+            draw_x -= pad;
+            draw_y -= pad;
+        }
+
+        if layer.shadow.enabled && layer.shadow.opacity > 0.01 {
+            let (sh_img, off_x, off_y) = apply_drop_shadow(&layer_img, &layer.shadow);
+            layer_img = sh_img;
+            draw_x -= off_x;
+            draw_y -= off_y;
+        }
+
+        if layer.clip_to_below {
+            if let Some(ref mask_alpha) = prev_canvas_alpha {
+                composite_layer_clipped(
+                    &mut canvas,
+                    &layer_img,
+                    draw_x,
+                    draw_y,
+                    layer.opacity.clamp(0.0, 1.0),
+                    &layer.blend_mode,
+                    mask_alpha,
+                );
+                continue;
+            }
+        }
+
+        // Record this layer's canvas-space alpha for potential clipping mask on the layer above
+        let mut alpha_map = vec![0u8; (cw * ch) as usize];
+        for ly in 0..layer_img.height() as i64 {
+            let cy = draw_y + ly;
+            if cy < 0 || cy >= ch as i64 {
+                continue;
+            }
+            for lx in 0..layer_img.width() as i64 {
+                let cx = draw_x + lx;
+                if cx < 0 || cx >= cw as i64 {
+                    continue;
+                }
+                alpha_map[(cy as u32 * cw + cx as u32) as usize] =
+                    layer_img.get_pixel(lx as u32, ly as u32)[3];
+            }
+        }
+        prev_canvas_alpha = Some(alpha_map);
 
         composite_layer(
             &mut canvas,
             &layer_img,
-            layer.x,
-            layer.y,
+            draw_x,
+            draw_y,
             layer.opacity.clamp(0.0, 1.0),
             &layer.blend_mode,
         );
@@ -392,6 +601,15 @@ fn render_layer_kind(kind: &LayerKind) -> Result<RgbaImage, String> {
             stroke_color,
             stroke_width,
             size,
+            bold,
+            italic,
+            align,
+            line_height,
+            letter_spacing,
+            underline,
+            gradient_colors,
+            gradient_angle,
+            curve_amount,
         } => render_text_3d(
             content,
             font_style,
@@ -401,6 +619,15 @@ fn render_layer_kind(kind: &LayerKind) -> Result<RgbaImage, String> {
             *stroke_color,
             *stroke_width,
             *size,
+            *bold,
+            *italic,
+            align,
+            *line_height,
+            *letter_spacing,
+            *underline,
+            *gradient_colors,
+            *gradient_angle,
+            *curve_amount,
         ),
         LayerKind::Shape {
             shape_type,
@@ -410,6 +637,9 @@ fn render_layer_kind(kind: &LayerKind) -> Result<RgbaImage, String> {
             border_radius,
             border_color,
             border_width,
+            sides,
+            corner_radii,
+            fill_gradient,
         } => Ok(render_shape(
             shape_type,
             (*width).max(1),
@@ -418,6 +648,9 @@ fn render_layer_kind(kind: &LayerKind) -> Result<RgbaImage, String> {
             *border_radius,
             *border_color,
             *border_width,
+            *sides,
+            *corner_radii,
+            fill_gradient.as_ref(),
         )),
         LayerKind::Gradient {
             width,
@@ -453,6 +686,7 @@ fn render_layer_kind(kind: &LayerKind) -> Result<RgbaImage, String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_text_3d(
     content: &str,
     font_style: &str,
@@ -462,36 +696,98 @@ fn render_text_3d(
     stroke_color: [u8; 4],
     stroke_width: u32,
     size: f32,
+    bold: bool,
+    italic: bool,
+    align: &str,
+    line_height: f32,
+    letter_spacing: f32,
+    underline: bool,
+    gradient_colors: Option<[[u8; 4]; 2]>,
+    gradient_angle: f32,
+    curve_amount: f32,
 ) -> Result<RgbaImage, String> {
     let font_bytes = load_font_bytes(font_style)?;
     let font = FontVec::try_from_vec(font_bytes).map_err(|_| "Failed to parse font".to_string())?;
     let scale = PxScale::from(size.max(8.0));
     let scaled = font.as_scaled(scale);
 
-    let mut total_w: f32 = 0.0;
-    let mut prev = None;
-    for ch in content.chars() {
-        let gid = scaled.glyph_id(ch);
-        if let Some(p) = prev {
-            total_w += scaled.kern(p, gid);
-        }
-        prev = Some(gid);
-        total_w += scaled.h_advance(gid);
-    }
+    let lines: Vec<&str> = if content.is_empty() {
+        vec![""]
+    } else {
+        content.split('\n').collect()
+    };
 
-    let pad = (depth + stroke_width + 12) as i32;
-    let line_h = (scaled.ascent() - scaled.descent()).ceil() as i32;
-    let img_w = (total_w.ceil() as i32 + pad * 2).max(16) as u32;
-    let img_h = (line_h + pad * 2).max(16) as u32;
+    let measure_line = |line: &str| -> f32 {
+        let mut w: f32 = 0.0;
+        let mut prev = None;
+        let mut count = 0;
+        for ch in line.chars() {
+            let gid = scaled.glyph_id(ch);
+            if let Some(p) = prev {
+                w += scaled.kern(p, gid) + letter_spacing;
+            }
+            prev = Some(gid);
+            w += scaled.h_advance(gid);
+            count += 1;
+        }
+        if bold && count > 0 {
+            w += (size * 0.04).max(1.0);
+        }
+        w.max(0.0)
+    };
+
+    let line_widths: Vec<f32> = lines.iter().map(|l| measure_line(l)).collect();
+    let max_line_w = line_widths.iter().copied().fold(0.0_f32, f32::max);
+    let italic_pad = if italic { (size * 0.25).ceil() as i32 } else { 0 };
+    let curve_pad = if curve_amount.abs() > 0.5 {
+        (curve_amount.abs() * 1.4).ceil() as i32
+    } else {
+        0
+    };
+    let pad = (depth + stroke_width + 14) as i32 + italic_pad + curve_pad;
+    let raw_line_h = (scaled.ascent() - scaled.descent()).ceil();
+    let step_y = (raw_line_h * line_height.clamp(0.7, 3.0)).max(8.0);
+    let total_h = raw_line_h + step_y * (lines.len().saturating_sub(1) as f32);
+
+    let img_w = (max_line_w.ceil() as i32 + pad * 2).max(16) as u32;
+    let img_h = (total_h.ceil() as i32 + pad * 2).max(16) as u32;
     let mut img = RgbaImage::from_pixel(img_w, img_h, Rgba([0, 0, 0, 0]));
 
     let base_x = pad as f32;
     let base_y = pad as f32 + scaled.ascent();
 
+    let draw_multiline = |target: &mut RgbaImage, ox: f32, oy: f32, col: [u8; 4]| {
+        for (idx, line) in lines.iter().enumerate() {
+            let lw = line_widths[idx];
+            let align_off = match align {
+                "center" => (max_line_w - lw) / 2.0,
+                "right" => max_line_w - lw,
+                _ => 0.0,
+            };
+            let lx = base_x + ox + align_off;
+            let ly = base_y + oy + (idx as f32) * step_y;
+            draw_text_pass(
+                target,
+                &font,
+                scale,
+                line,
+                lx,
+                ly,
+                col,
+                bold,
+                italic,
+                letter_spacing,
+                underline,
+                curve_amount,
+                lw,
+            );
+        }
+    };
+
     // 1. Drop shadow
     if depth > 0 {
         let sh_off = (depth + 3) as f32;
-        draw_text_pass(&mut img, &font, scale, content, base_x + sh_off, base_y + sh_off, shadow_color);
+        draw_multiline(&mut img, sh_off, sh_off, shadow_color);
     }
 
     // 2. 3D Extrusion layers
@@ -504,7 +800,7 @@ fn render_text_3d(
         ];
         for d in (1..=depth).rev() {
             let df = d as f32;
-            draw_text_pass(&mut img, &font, scale, content, base_x + df, base_y + df, extrude_color);
+            draw_multiline(&mut img, df, df, extrude_color);
         }
     }
 
@@ -514,25 +810,35 @@ fn render_text_3d(
         for dy in -sw..=sw {
             for dx in -sw..=sw {
                 if dx * dx + dy * dy <= sw * sw && (dx != 0 || dy != 0) {
-                    draw_text_pass(
-                        &mut img,
-                        &font,
-                        scale,
-                        content,
-                        base_x + dx as f32,
-                        base_y + dy as f32,
-                        stroke_color,
-                    );
+                    draw_multiline(&mut img, dx as f32, dy as f32, stroke_color);
                 }
             }
         }
     }
 
-    // 4. Main face
-    draw_text_pass(&mut img, &font, scale, content, base_x, base_y, color);
+    // 4. Main face (with optional gradient fill)
+    if let Some([from_c, to_c]) = gradient_colors {
+        let mut face = RgbaImage::from_pixel(img_w, img_h, Rgba([0, 0, 0, 0]));
+        draw_multiline(&mut face, 0.0, 0.0, [255, 255, 255, 255]);
+        let grad = render_gradient_image(img_w, img_h, from_c, to_c, gradient_angle);
+        for y in 0..img_h {
+            for x in 0..img_w {
+                let fa = face.get_pixel(x, y)[3];
+                if fa > 0 {
+                    let gp = grad.get_pixel(x, y);
+                    let dst = img.get_pixel_mut(x, y);
+                    let out_a = ((fa as f32 / 255.0) * (gp[3] as f32 / 255.0) * 255.0) as u8;
+                    blend_pixel_over(dst, [gp[0], gp[1], gp[2], out_a]);
+                }
+            }
+        }
+    } else {
+        draw_multiline(&mut img, 0.0, 0.0, color);
+    }
     Ok(img)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_text_pass(
     img: &mut RgbaImage,
     font: &FontVec,
@@ -541,36 +847,183 @@ fn draw_text_pass(
     start_x: f32,
     start_y: f32,
     color: [u8; 4],
+    bold: bool,
+    italic: bool,
+    letter_spacing: f32,
+    underline: bool,
+    curve_amount: f32,
+    line_width: f32,
 ) {
     let scaled = font.as_scaled(scale);
     let (w, h) = (img.width() as i32, img.height() as i32);
     let mut pen_x = start_x;
     let mut prev = None;
+    let bold_offset = if bold { (scale.x * 0.035).max(1.0).round() as i32 } else { 0 };
+    let line_center = start_x + line_width / 2.0;
 
     for ch in text.chars() {
         let gid = scaled.glyph_id(ch);
         if let Some(p) = prev {
-            pen_x += scaled.kern(p, gid);
+            pen_x += scaled.kern(p, gid) + letter_spacing;
         }
         prev = Some(gid);
 
-        let glyph = gid.with_scale_and_position(scale, ab_glyph::point(pen_x, start_y));
+        let arc_dy = if curve_amount.abs() > 0.5 && line_width > 1.0 {
+            let norm = ((pen_x + scaled.h_advance(gid) / 2.0 - line_center) / (line_width / 2.0)).clamp(-1.0, 1.0);
+            curve_amount * (norm * norm - 0.5)
+        } else {
+            0.0
+        };
+
+        let glyph = gid.with_scale_and_position(scale, ab_glyph::point(pen_x, start_y + arc_dy));
         if let Some(og) = font.outline_glyph(glyph) {
             let bb = og.px_bounds();
             og.draw(|rx, ry, v| {
-                let px = bb.min.x as i32 + rx as i32;
                 let py = bb.min.y as i32 + ry as i32;
+                let shear = if italic { ((start_y + arc_dy - py as f32) * 0.22).round() as i32 } else { 0 };
+                let px = bb.min.x as i32 + rx as i32 + shear;
+                let src_a = (v * (color[3] as f32 / 255.0)).clamp(0.0, 1.0);
+                let rgba = [color[0], color[1], color[2], (src_a * 255.0) as u8];
                 if px >= 0 && py >= 0 && px < w && py < h {
                     let dst = img.get_pixel_mut(px as u32, py as u32);
-                    let src_a = (v * (color[3] as f32 / 255.0)).clamp(0.0, 1.0);
-                    blend_pixel_over(dst, [color[0], color[1], color[2], (src_a * 255.0) as u8]);
+                    blend_pixel_over(dst, rgba);
+                }
+                if bold_offset > 0 {
+                    let bpx = px + bold_offset;
+                    if bpx >= 0 && py >= 0 && bpx < w && py < h {
+                        let dst = img.get_pixel_mut(bpx as u32, py as u32);
+                        blend_pixel_over(dst, rgba);
+                    }
                 }
             });
         }
         pen_x += scaled.h_advance(gid);
     }
+
+    if underline && line_width > 1.0 {
+        let ul_y = (start_y + (scale.y * 0.12).max(2.0)).round() as i32;
+        let ul_h = (scale.y * 0.06).max(2.0).round() as i32;
+        let x0 = start_x.round() as i32;
+        let x1 = (start_x + line_width).round() as i32;
+        for py in ul_y..(ul_y + ul_h) {
+            for px in x0..x1 {
+                if px >= 0 && py >= 0 && px < w && py < h {
+                    let dst = img.get_pixel_mut(px as u32, py as u32);
+                    blend_pixel_over(dst, color);
+                }
+            }
+        }
+    }
 }
 
+fn point_in_polygon(px: f32, py: f32, verts: &[(f32, f32)]) -> bool {
+    let mut inside = false;
+    let n = verts.len();
+    let mut j = n.saturating_sub(1);
+    for i in 0..n {
+        let (xi, yi) = verts[i];
+        let (xj, yj) = verts[j];
+        if ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / ((yj - yi) + 1e-6) + xi) {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+fn shape_hit(
+    shape_type: &str,
+    px: f32,
+    py: f32,
+    w: f32,
+    h: f32,
+    border_radius: u32,
+    sides: u32,
+    corner_radii: Option<[u32; 4]>,
+) -> bool {
+    match shape_type {
+        "circle" => {
+            let cx = w / 2.0;
+            let cy = h / 2.0;
+            let dx = (px - cx) / (w / 2.0).max(1.0);
+            let dy = (py - cy) / (h / 2.0).max(1.0);
+            dx * dx + dy * dy <= 1.0
+        }
+        "line" => {
+            let cy = h / 2.0;
+            (py - cy).abs() <= (h * 0.18).max(3.0)
+        }
+        "arrow" => {
+            let shaft_end = w * 0.68;
+            let mid_y = h / 2.0;
+            if px <= shaft_end {
+                (py - mid_y).abs() <= h * 0.18
+            } else {
+                let t = (px - shaft_end) / (w - shaft_end).max(1.0);
+                (py - mid_y).abs() <= (h * 0.48) * (1.0 - t)
+            }
+        }
+        "triangle" => {
+            let verts = [(w / 2.0, 1.0), (w - 1.0, h - 1.0), (1.0, h - 1.0)];
+            point_in_polygon(px, py, &verts)
+        }
+        "star" => {
+            let cx = w / 2.0;
+            let cy = h / 2.0;
+            let rx_out = w / 2.0 - 1.0;
+            let ry_out = h / 2.0 - 1.0;
+            let rx_in = rx_out * 0.42;
+            let ry_in = ry_out * 0.42;
+            let pts = sides.max(4).min(12) as usize * 2;
+            let mut verts = Vec::with_capacity(pts);
+            for i in 0..pts {
+                let ang = (i as f32) * std::f32::consts::PI / (pts as f32 / 2.0) - std::f32::consts::FRAC_PI_2;
+                let (rx, ry) = if i % 2 == 0 { (rx_out, ry_out) } else { (rx_in, ry_in) };
+                verts.push((cx + rx * ang.cos(), cy + ry * ang.sin()));
+            }
+            point_in_polygon(px, py, &verts)
+        }
+        "polygon" => {
+            let cx = w / 2.0;
+            let cy = h / 2.0;
+            let rx = w / 2.0 - 1.0;
+            let ry = h / 2.0 - 1.0;
+            let n = sides.max(3).min(16) as usize;
+            let mut verts = Vec::with_capacity(n);
+            for i in 0..n {
+                let ang = (i as f32) * 2.0 * std::f32::consts::PI / (n as f32) - std::f32::consts::FRAC_PI_2;
+                verts.push((cx + rx * ang.cos(), cy + ry * ang.sin()));
+            }
+            point_in_polygon(px, py, &verts)
+        }
+        "badge" => rounded_rect_hit(px, py, w, h, h / 2.0),
+        _ => {
+            if let Some([tl, tr, br, bl]) = corner_radii {
+                let max_r = w.min(h) / 2.0;
+                let r = if px < w / 2.0 && py < h / 2.0 {
+                    (tl as f32).min(max_r)
+                } else if px >= w / 2.0 && py < h / 2.0 {
+                    (tr as f32).min(max_r)
+                } else if px >= w / 2.0 && py >= h / 2.0 {
+                    (br as f32).min(max_r)
+                } else {
+                    (bl as f32).min(max_r)
+                };
+                if r > 0.5 {
+                    rounded_rect_hit(px, py, w, h, r)
+                } else {
+                    true
+                }
+            } else if border_radius > 0 {
+                rounded_rect_hit(px, py, w, h, (border_radius as f32).min(w.min(h) / 2.0))
+            } else {
+                true
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_shape(
     shape_type: &str,
     width: u32,
@@ -579,43 +1032,59 @@ fn render_shape(
     border_radius: u32,
     border_color: [u8; 4],
     border_width: u32,
+    sides: u32,
+    corner_radii: Option<[u32; 4]>,
+    fill_gradient: Option<&BgGradient>,
 ) -> RgbaImage {
     let mut img = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 0]));
-    let r = match shape_type {
-        "circle" => width.min(height) as f32 / 2.0,
-        "badge" => height as f32 / 2.0,
-        _ => (border_radius as f32).min(width.min(height) as f32 / 2.0),
-    };
+    let grad_img = fill_gradient.map(|g| render_gradient_image(width, height, g.from_color, g.to_color, g.angle));
+    let (wf, hf) = (width as f32, height as f32);
 
+    let mut mask = vec![false; (width * height) as usize];
     for y in 0..height {
         for x in 0..width {
-            let inside = if shape_type == "circle" {
-                let cx = width as f32 / 2.0;
-                let cy = height as f32 / 2.0;
-                let rx = (width as f32 / 2.0).max(1.0);
-                let ry = (height as f32 / 2.0).max(1.0);
-                let dx = (x as f32 + 0.5 - cx) / rx;
-                let dy = (y as f32 + 0.5 - cy) / ry;
-                dx * dx + dy * dy <= 1.0
-            } else if r > 0.5 {
-                rounded_rect_hit(x as f32 + 0.5, y as f32 + 0.5, width as f32, height as f32, r)
-            } else {
-                true
-            };
-            if inside {
-                // Check if pixel is on the border
-                let bw = border_width as i32;
-                let on_border = if border_width > 0 && border_color[3] > 0 {
-                    let near_edge = (x as i32) < bw
-                        || (x as i32) >= (width as i32 - bw)
-                        || (y as i32) < bw
-                        || (y as i32) >= (height as i32 - bw);
-                    near_edge
-                } else {
-                    false
-                };
-                img.put_pixel(x, y, if on_border { Rgba(border_color) } else { Rgba(fill_color) });
+            mask[(y * width + x) as usize] = shape_hit(
+                shape_type,
+                x as f32 + 0.5,
+                y as f32 + 0.5,
+                wf,
+                hf,
+                border_radius,
+                sides,
+                corner_radii,
+            );
+        }
+    }
+
+    let bw = border_width.min(32) as i32;
+    for y in 0..height as i32 {
+        for x in 0..width as i32 {
+            if !mask[(y as u32 * width + x as u32) as usize] {
+                continue;
             }
+            let mut on_border = false;
+            if bw > 0 && border_color[3] > 0 {
+                'edge: for oy in -bw..=bw {
+                    for ox in -bw..=bw {
+                        if ox * ox + oy * oy <= bw * bw {
+                            let nx = x + ox;
+                            let ny = y + oy;
+                            if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 || !mask[(ny as u32 * width + nx as u32) as usize] {
+                                on_border = true;
+                                break 'edge;
+                            }
+                        }
+                    }
+                }
+            }
+            let px_col = if on_border {
+                Rgba(border_color)
+            } else if let Some(ref gi) = grad_img {
+                *gi.get_pixel(x as u32, y as u32)
+            } else {
+                Rgba(fill_color)
+            };
+            img.put_pixel(x as u32, y as u32, px_col);
         }
     }
     img
@@ -664,7 +1133,25 @@ fn render_watermark_layer(
     canvas_height: u32,
 ) -> Result<RgbaImage, String> {
     // Render the text, then place it on a transparent canvas at the right corner
-    let text_img = render_text_3d(text, font_style, color, 0, [0, 0, 0, 0], [0, 0, 0, 0], 0, size)?;
+    let text_img = render_text_3d(
+        text,
+        font_style,
+        color,
+        0,
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+        0,
+        size,
+        false,
+        false,
+        "left",
+        1.2,
+        0.0,
+        false,
+        None,
+        0.0,
+        0.0,
+    )?;
     let mut canvas = RgbaImage::from_pixel(canvas_width, canvas_height, Rgba([0, 0, 0, 0]));
     let tw = text_img.width();
     let th = text_img.height();
@@ -896,4 +1383,186 @@ fn blend_pixel_over(dst: &mut Rgba<u8>, src: [u8; 4]) {
         dst[i] = (oc.clamp(0.0, 1.0) * 255.0) as u8;
     }
     dst[3] = (out_a.clamp(0.0, 1.0) * 255.0) as u8;
+}
+
+fn apply_shape_mask(src: &RgbaImage, mask_kind: &str, radius: u32) -> RgbaImage {
+    let mut out = src.clone();
+    let (w, h) = (out.width() as f32, out.height() as f32);
+    let shape = match mask_kind {
+        "circle" => "circle",
+        "star" => "star",
+        _ => "rectangle",
+    };
+    let r = if mask_kind == "rounded" { radius.max(16) } else { 0 };
+    for y in 0..out.height() {
+        for x in 0..out.width() {
+            if !shape_hit(shape, x as f32 + 0.5, y as f32 + 0.5, w, h, r, 5, None) {
+                out.get_pixel_mut(x, y)[3] = 0;
+            }
+        }
+    }
+    out
+}
+
+fn apply_outer_glow(src: &RgbaImage, color: [u8; 4], intensity: f32) -> RgbaImage {
+    let pad = (intensity.ceil() as u32).min(40).max(2);
+    let nw = src.width() + pad * 2;
+    let nh = src.height() + pad * 2;
+    let mut sil = RgbaImage::from_pixel(nw, nh, Rgba([0, 0, 0, 0]));
+    for y in 0..src.height() {
+        for x in 0..src.width() {
+            let a = src.get_pixel(x, y)[3];
+            if a > 0 {
+                let ga = ((a as f32 / 255.0) * (color[3] as f32 / 255.0) * 255.0) as u8;
+                sil.put_pixel(x + pad, y + pad, Rgba([color[0], color[1], color[2], ga]));
+            }
+        }
+    }
+    let mut blurred = DynamicImage::ImageRgba8(sil)
+        .blur((intensity * 0.45).clamp(1.0, 18.0))
+        .to_rgba8();
+    for y in 0..src.height() {
+        for x in 0..src.width() {
+            let p = src.get_pixel(x, y);
+            if p[3] > 0 {
+                let dst = blurred.get_pixel_mut(x + pad, y + pad);
+                blend_pixel_over(dst, p.0);
+            }
+        }
+    }
+    blurred
+}
+
+fn apply_inner_glow(src: &RgbaImage, color: [u8; 4], intensity: f32) -> RgbaImage {
+    let mut out = src.clone();
+    let rad = (intensity.round() as i32).clamp(1, 20);
+    let r2 = rad * rad;
+    let (sw, sh) = (src.width() as i32, src.height() as i32);
+    for y in 0..sh {
+        for x in 0..sw {
+            let orig = src.get_pixel(x as u32, y as u32).0;
+            if orig[3] == 0 {
+                continue;
+            }
+            let mut min_d2 = r2 + 1;
+            for oy in -rad..=rad {
+                for ox in -rad..=rad {
+                    let d2 = ox * ox + oy * oy;
+                    if d2 < min_d2 {
+                        let nx = x + ox;
+                        let ny = y + oy;
+                        if nx < 0 || ny < 0 || nx >= sw || ny >= sh || src.get_pixel(nx as u32, ny as u32)[3] < 32 {
+                            min_d2 = d2;
+                        }
+                    }
+                }
+            }
+            if min_d2 <= r2 {
+                let t = 1.0 - (min_d2 as f32).sqrt() / (rad as f32 + 0.5);
+                let ga = (t * (color[3] as f32 / 255.0) * 200.0).clamp(0.0, 255.0) as u8;
+                let dst = out.get_pixel_mut(x as u32, y as u32);
+                blend_pixel_over(dst, [color[0], color[1], color[2], ga]);
+                dst[3] = orig[3];
+            }
+        }
+    }
+    out
+}
+
+fn apply_drop_shadow(src: &RgbaImage, sh: &DropShadow) -> (RgbaImage, i64, i64) {
+    let pad = (sh.blur.ceil() as i32 + sh.distance.ceil() as i32 + 6).min(60).max(4);
+    let nw = (src.width() as i32 + pad * 2) as u32;
+    let nh = (src.height() as i32 + pad * 2) as u32;
+
+    let rad = sh.angle.to_radians();
+    let dx = (sh.distance * rad.cos()).round() as i32;
+    let dy = (sh.distance * rad.sin()).round() as i32;
+
+    let mut sil = RgbaImage::from_pixel(nw, nh, Rgba([0, 0, 0, 0]));
+    for y in 0..src.height() as i32 {
+        for x in 0..src.width() as i32 {
+            let a = src.get_pixel(x as u32, y as u32)[3];
+            if a > 0 {
+                let tx = x + pad + dx;
+                let ty = y + pad + dy;
+                if tx >= 0 && ty >= 0 && tx < nw as i32 && ty < nh as i32 {
+                    let sa = ((a as f32 / 255.0) * sh.opacity.clamp(0.0, 1.0) * 255.0) as u8;
+                    sil.put_pixel(tx as u32, ty as u32, Rgba([sh.color[0], sh.color[1], sh.color[2], sa]));
+                }
+            }
+        }
+    }
+    let mut out = if sh.blur > 0.4 {
+        DynamicImage::ImageRgba8(sil)
+            .blur((sh.blur * 0.5).clamp(0.5, 25.0))
+            .to_rgba8()
+    } else {
+        sil
+    };
+    for y in 0..src.height() {
+        for x in 0..src.width() {
+            let p = src.get_pixel(x, y);
+            if p[3] > 0 {
+                let dst = out.get_pixel_mut(x + pad as u32, y + pad as u32);
+                blend_pixel_over(dst, p.0);
+            }
+        }
+    }
+    (out, pad as i64, pad as i64)
+}
+
+fn composite_layer_clipped(
+    canvas: &mut RgbaImage,
+    layer: &RgbaImage,
+    pos_x: i64,
+    pos_y: i64,
+    opacity: f32,
+    blend_mode: &str,
+    mask_alpha: &[u8],
+) {
+    let cw = canvas.width() as i64;
+    let ch = canvas.height() as i64;
+    let lw = layer.width() as i64;
+    let lh = layer.height() as i64;
+
+    for ly in 0..lh {
+        let cy = pos_y + ly;
+        if cy < 0 || cy >= ch {
+            continue;
+        }
+        for lx in 0..lw {
+            let cx = pos_x + lx;
+            if cx < 0 || cx >= cw {
+                continue;
+            }
+            let ma = mask_alpha[(cy as u32 * canvas.width() + cx as u32) as usize];
+            if ma == 0 {
+                continue;
+            }
+            let src = layer.get_pixel(lx as u32, ly as u32).0;
+            if src[3] == 0 {
+                continue;
+            }
+            let sa = (src[3] as f32 / 255.0) * (ma as f32 / 255.0) * opacity;
+            if sa <= 0.001 {
+                continue;
+            }
+            let dst = canvas.get_pixel_mut(cx as u32, cy as u32);
+            let mut blended = [src[0], src[1], src[2]];
+            if dst[3] > 0 {
+                for i in 0..3 {
+                    let s = src[i] as f32 / 255.0;
+                    let d = dst[i] as f32 / 255.0;
+                    let out = match blend_mode {
+                        "multiply" => s * d,
+                        "screen" => 1.0 - (1.0 - s) * (1.0 - d),
+                        "overlay" => if d < 0.5 { 2.0 * s * d } else { 1.0 - 2.0 * (1.0 - s) * (1.0 - d) },
+                        _ => s,
+                    };
+                    blended[i] = (out.clamp(0.0, 1.0) * 255.0) as u8;
+                }
+            }
+            blend_pixel_over(dst, [blended[0], blended[1], blended[2], (sa * 255.0) as u8]);
+        }
+    }
 }

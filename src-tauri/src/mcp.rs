@@ -1,5 +1,6 @@
 use crate::layers::{
-    parse_hex_color, BgGradient, Layer, LayerEffects, LayerKind, LayerOutline, SharedProjectState,
+    parse_hex_color, BgGradient, Layer, LayerEffects, LayerGroup, LayerKind, LayerOutline,
+    SharedProjectState,
 };
 use crate::tools::{internal_get_preview_base64, render_and_respond};
 use serde_json::{json, Value};
@@ -485,6 +486,7 @@ fn execute_mcp_layer_tool(
                 blend_mode: "normal".to_string(),
                 bounds_width: 0,
                 bounds_height: 0,
+                group_id: None,
                 effects: LayerEffects::default(),
                 outline: LayerOutline::default(),
                 kind: LayerKind::Image {
@@ -548,6 +550,7 @@ fn execute_mcp_layer_tool(
                 blend_mode: "normal".to_string(),
                 bounds_width: 0,
                 bounds_height: 0,
+                group_id: None,
                 effects: LayerEffects::default(),
                 outline: LayerOutline::default(),
                 kind: LayerKind::Text3D {
@@ -559,6 +562,11 @@ fn execute_mcp_layer_tool(
                     stroke_color: stroke,
                     stroke_width: stroke_w,
                     size,
+                    bold: p["bold"].as_bool().unwrap_or(false),
+                    italic: p["italic"].as_bool().unwrap_or(false),
+                    align: p["align"].as_str().unwrap_or("left").to_string(),
+                    line_height: p["line_height"].as_f64().unwrap_or(1.2) as f32,
+                    letter_spacing: p["letter_spacing"].as_f64().unwrap_or(0.0) as f32,
                 },
             });
             render_and_respond(s)
@@ -584,6 +592,11 @@ fn execute_mcp_layer_tool(
                     stroke_color,
                     stroke_width,
                     size,
+                    bold,
+                    italic,
+                    align,
+                    line_height,
+                    letter_spacing,
                     ..
                 } => {
                     *c = content;
@@ -605,8 +618,65 @@ fn execute_mcp_layer_tool(
                     if let Some(sw) = p["stroke_width"].as_u64() {
                         *stroke_width = sw as u32;
                     }
+                    if let Some(v) = p["bold"].as_bool() {
+                        *bold = v;
+                    }
+                    if let Some(v) = p["italic"].as_bool() {
+                        *italic = v;
+                    }
+                    if let Some(v) = p["align"].as_str() {
+                        *align = v.to_string();
+                    }
+                    if let Some(v) = p["line_height"].as_f64() {
+                        *line_height = (v as f32).clamp(0.7, 3.0);
+                    }
+                    if let Some(v) = p["letter_spacing"].as_f64() {
+                        *letter_spacing = (v as f32).clamp(-20.0, 80.0);
+                    }
                 }
                 _ => return Err("Layer is not a Text layer".to_string()),
+            }
+            render_and_respond(s)
+        }
+        "update_shape_layer" => {
+            let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
+            s.push_undo();
+            let layer = s
+                .current
+                .layers
+                .iter_mut()
+                .find(|l| l.id == lid)
+                .ok_or_else(|| format!("Layer '{}' not found", lid))?;
+            match &mut layer.kind {
+                LayerKind::Shape {
+                    width,
+                    height,
+                    fill_color,
+                    border_radius,
+                    border_color,
+                    border_width,
+                    ..
+                } => {
+                    if let Some(w) = p["width"].as_u64() {
+                        *width = (w as u32).max(4);
+                    }
+                    if let Some(h) = p["height"].as_u64() {
+                        *height = (h as u32).max(4);
+                    }
+                    if let Some(fh) = p["fill_hex"].as_str() {
+                        *fill_color = parse_hex_color(fh);
+                    }
+                    if let Some(br) = p["border_radius"].as_u64() {
+                        *border_radius = br as u32;
+                    }
+                    if let Some(bh) = p["border_hex"].as_str() {
+                        *border_color = parse_hex_color(bh);
+                    }
+                    if let Some(bw) = p["border_width"].as_u64() {
+                        *border_width = bw as u32;
+                    }
+                }
+                _ => return Err("Layer is not a Shape layer".to_string()),
             }
             render_and_respond(s)
         }
@@ -640,6 +710,7 @@ fn execute_mcp_layer_tool(
                 blend_mode: "normal".to_string(),
                 bounds_width: 0,
                 bounds_height: 0,
+                group_id: None,
                 effects: LayerEffects::default(),
                 outline: LayerOutline::default(),
                 kind: LayerKind::Shape {
@@ -700,6 +771,7 @@ fn execute_mcp_layer_tool(
                 blend_mode: "normal".to_string(),
                 bounds_width: 0,
                 bounds_height: 0,
+                group_id: None,
                 effects: LayerEffects::default(),
                 outline: LayerOutline::default(),
                 kind: LayerKind::Gradient {
@@ -739,6 +811,7 @@ fn execute_mcp_layer_tool(
                 blend_mode: "normal".to_string(),
                 bounds_width: 0,
                 bounds_height: 0,
+                group_id: None,
                 effects: LayerEffects::default(),
                 outline: LayerOutline::default(),
                 kind: LayerKind::Watermark {
@@ -919,6 +992,105 @@ fn execute_mcp_layer_tool(
             s.current.layers.insert(idx + 1, copy);
             render_and_respond(s)
         }
+        "group_layers" => {
+            let ids: Vec<String> = p["layer_ids"]
+                .as_array()
+                .ok_or("Missing 'layer_ids'")?
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            if ids.is_empty() {
+                return Err("layer_ids cannot be empty".to_string());
+            }
+            s.push_undo();
+            let gid = format!("group-{}", s.next_layer_seq);
+            s.next_layer_seq += 1;
+            let name = p["name"]
+                .as_str()
+                .map(String::from)
+                .unwrap_or_else(|| format!("Group {}", s.current.groups.len() + 1));
+            s.current.groups.push(LayerGroup {
+                id: gid.clone(),
+                name,
+                parent_group_id: p["parent_group_id"].as_str().map(String::from),
+                visible: true,
+                locked: false,
+                collapsed: false,
+            });
+            for l in &mut s.current.layers {
+                if ids.contains(&l.id) {
+                    l.group_id = Some(gid.clone());
+                }
+            }
+            render_and_respond(s)
+        }
+        "ungroup_layers" => {
+            let gid = p["group_id"].as_str().ok_or("Missing 'group_id'")?;
+            s.push_undo();
+            for l in &mut s.current.layers {
+                if l.group_id.as_deref() == Some(gid) {
+                    l.group_id = None;
+                }
+            }
+            s.current.groups.retain(|g| g.id != gid);
+            render_and_respond(s)
+        }
+        "align_layers" => {
+            let ids: Vec<String> = p["layer_ids"]
+                .as_array()
+                .ok_or("Missing 'layer_ids'")?
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            let alignment = p["alignment"].as_str().ok_or("Missing 'alignment'")?;
+            if ids.is_empty() {
+                return Err("layer_ids cannot be empty".to_string());
+            }
+            s.push_undo();
+            let cw = s.current.canvas_width as f32;
+            let ch = s.current.canvas_height as f32;
+            let selected: Vec<(f32, f32, f32, f32)> = s
+                .current
+                .layers
+                .iter()
+                .filter(|l| ids.contains(&l.id))
+                .map(|l| {
+                    (
+                        l.x as f32,
+                        l.y as f32,
+                        (l.bounds_width.max(1) as f32) * l.scale,
+                        (l.bounds_height.max(1) as f32) * l.scale,
+                    )
+                })
+                .collect();
+            let (rl, rt, rr, rb) = if selected.len() <= 1 {
+                (0.0, 0.0, cw, ch)
+            } else {
+                (
+                    selected.iter().map(|i| i.0).fold(f32::MAX, f32::min),
+                    selected.iter().map(|i| i.1).fold(f32::MAX, f32::min),
+                    selected.iter().map(|i| i.0 + i.2).fold(f32::MIN, f32::max),
+                    selected.iter().map(|i| i.1 + i.3).fold(f32::MIN, f32::max),
+                )
+            };
+            for l in &mut s.current.layers {
+                if !ids.contains(&l.id) || l.locked {
+                    continue;
+                }
+                let w = (l.bounds_width.max(1) as f32) * l.scale;
+                let h = (l.bounds_height.max(1) as f32) * l.scale;
+                match alignment {
+                    "left" => l.x = rl.round() as i64,
+                    "center" => l.x = ((rl + rr) / 2.0 - w / 2.0).round() as i64,
+                    "right" => l.x = (rr - w).round() as i64,
+                    "top" => l.y = rt.round() as i64,
+                    "middle" => l.y = ((rt + rb) / 2.0 - h / 2.0).round() as i64,
+                    "bottom" => l.y = (rb - h).round() as i64,
+                    _ => {}
+                }
+            }
+            render_and_respond(s)
+        }
         "undo" => {
             if let Some(prev) = s.undo_stack.pop() {
                 let curr = std::mem::replace(&mut s.current, prev);
@@ -1064,9 +1236,31 @@ fn build_tools_description() -> Value {
                         "color_hex": { "type": "string" },
                         "depth_3d": { "type": "integer", "minimum": 0, "maximum": 30 },
                         "stroke_hex": { "type": "string" },
-                        "stroke_width": { "type": "integer", "minimum": 0, "maximum": 10 }
+                        "stroke_width": { "type": "integer", "minimum": 0, "maximum": 10 },
+                        "bold": { "type": "boolean" },
+                        "italic": { "type": "boolean" },
+                        "align": { "type": "string", "enum": ["left","center","right"] },
+                        "line_height": { "type": "number" },
+                        "letter_spacing": { "type": "number" }
                     },
                     "required": ["layer_id", "content"]
+                }
+            },
+            {
+                "name": "update_shape_layer",
+                "description": "Edit an existing Shape layer's size, fill, corner radius, or border.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "layer_id": { "type": "string" },
+                        "width": { "type": "integer", "minimum": 4 },
+                        "height": { "type": "integer", "minimum": 4 },
+                        "fill_hex": { "type": "string" },
+                        "border_radius": { "type": "integer", "minimum": 0 },
+                        "border_hex": { "type": "string" },
+                        "border_width": { "type": "integer", "minimum": 0 }
+                    },
+                    "required": ["layer_id"]
                 }
             },
             {
@@ -1236,6 +1430,40 @@ fn build_tools_description() -> Value {
                     "type": "object",
                     "properties": { "layer_id": { "type": "string" } },
                     "required": ["layer_id"]
+                }
+            },
+            {
+                "name": "group_layers",
+                "description": "Group multiple layers into a named (optionally nested) group.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "layer_ids": { "type": "array", "items": { "type": "string" } },
+                        "name": { "type": "string" },
+                        "parent_group_id": { "type": "string" }
+                    },
+                    "required": ["layer_ids"]
+                }
+            },
+            {
+                "name": "ungroup_layers",
+                "description": "Ungroup a group by its ID.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "group_id": { "type": "string" } },
+                    "required": ["group_id"]
+                }
+            },
+            {
+                "name": "align_layers",
+                "description": "Align one or more layers (left, center, right, top, middle, bottom).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "layer_ids": { "type": "array", "items": { "type": "string" } },
+                        "alignment": { "type": "string", "enum": ["left","center","right","top","middle","bottom"] }
+                    },
+                    "required": ["layer_ids", "alignment"]
                 }
             },
             {
