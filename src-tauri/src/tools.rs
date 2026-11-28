@@ -512,20 +512,20 @@ pub fn update_shape_layer(
                 *fg = None;
             } else if fill_gradient_from.is_some() || fill_gradient_to.is_some() {
                 let cur = fg.clone().unwrap_or(BgGradient {
-                    from: *fill_color,
-                    to: [56, 189, 248, 255],
+                    from_color: *fill_color,
+                    to_color: [56, 189, 248, 255],
                     angle: 45.0,
                 });
-                let from = fill_gradient_from
+                let from_color = fill_gradient_from
                     .as_deref()
                     .map(hex_to_rgba8)
-                    .unwrap_or(cur.from);
-                let to = fill_gradient_to
+                    .unwrap_or(cur.from_color);
+                let to_color = fill_gradient_to
                     .as_deref()
                     .map(hex_to_rgba8)
-                    .unwrap_or(cur.to);
+                    .unwrap_or(cur.to_color);
                 let angle = fill_gradient_angle.unwrap_or(cur.angle);
-                *fg = Some(BgGradient { from, to, angle });
+                *fg = Some(BgGradient { from_color, to_color, angle });
             } else if let Some(ang) = fill_gradient_angle {
                 if let Some(g) = fg {
                     g.angle = ang;
@@ -1634,16 +1634,20 @@ pub fn duplicate_layers(
     }
     let mut s = state.lock().map_err(|e| e.to_string())?;
     s.push_undo();
+    let selected: Vec<Layer> = s
+        .current
+        .layers
+        .iter()
+        .filter(|l| layer_ids.contains(&l.id))
+        .cloned()
+        .collect();
     let mut copies = Vec::new();
-    for l in &s.current.layers {
-        if layer_ids.contains(&l.id) {
-            let mut copy = l.clone();
-            copy.id = s.next_id();
-            copy.name = format!("{} Copy", copy.name);
-            copy.x += 20;
-            copy.y += 20;
-            copies.push(copy);
-        }
+    for mut copy in selected {
+        copy.id = s.next_id();
+        copy.name = format!("{} Copy", copy.name);
+        copy.x += 20;
+        copy.y += 20;
+        copies.push(copy);
     }
     s.current.layers.extend(copies);
     render_and_respond(&mut s)
@@ -2163,8 +2167,8 @@ pub fn add_shape_advanced(
     let b_color = border_hex.as_deref().map(parse_hex_color).unwrap_or([255,255,255,255]);
     let fill_gradient = match (fill_gradient_from.as_deref(), fill_gradient_to.as_deref()) {
         (Some(a), Some(b)) => Some(BgGradient {
-            from: hex_to_rgba8(a),
-            to: hex_to_rgba8(b),
+            from_color: hex_to_rgba8(a),
+            to_color: hex_to_rgba8(b),
             angle: fill_gradient_angle.unwrap_or(0.0),
         }),
         _ => None,
@@ -2924,7 +2928,7 @@ pub fn export_all_brand_sizes(
     for (name, target_w, target_h) in BRAND_SIZES {
         let resized = base_img.resize_exact(*target_w, *target_h, FilterType::Lanczos3);
         let out_path = std::path::Path::new(&dest_dir).join(format!("{}.{}", name, ext));
-        save_image_formatted(&resized, out_path.to_str().unwrap_or(""), &format, quality)?;
+        save_image_formatted(&resized, &out_path, &format, quality)?;
         saved.push(out_path.to_string_lossy().to_string());
     }
     Ok(saved)
@@ -2932,7 +2936,7 @@ pub fn export_all_brand_sizes(
 
 /// Return full serialized project snapshot for AI/MCP inspection.
 #[tauri::command]
-pub fn get_project_state(
+pub fn get_project_snapshot_json(
     state: tauri::State<'_, SharedProjectState>,
 ) -> Result<serde_json::Value, String> {
     let s = state.lock().map_err(|e| e.to_string())?;
@@ -2962,7 +2966,7 @@ pub fn get_layer_thumbnails(
             let scale = (64.0 / w.max(h) as f32).min(1.0);
             let nw = ((w as f32 * scale) as u32).max(1);
             let nh = ((h as f32 * scale) as u32).max(1);
-            let thumb = img.resize_exact(nw, nh, FilterType::Triangle);
+            let thumb = image::DynamicImage::ImageRgba8(img).resize_exact(nw, nh, FilterType::Triangle);
             let mut buf = Vec::new();
             if thumb
                 .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)

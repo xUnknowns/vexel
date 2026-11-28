@@ -1517,8 +1517,8 @@ fn execute_mcp_layer_tool(
                 p["fill_gradient_to"].as_str(),
             ) {
                 (Some(a), Some(b)) => Some(BgGradient {
-                    from: parse_hex_color(a),
-                    to: parse_hex_color(b),
+                    from_color: parse_hex_color(a),
+                    to_color: parse_hex_color(b),
                     angle: p["fill_gradient_angle"].as_f64().unwrap_or(45.0) as f32,
                 }),
                 _ => None,

@@ -105,7 +105,7 @@ fn main() {
             tools::add_smart_text_layer,
             tools::list_brand_sizes,
             tools::export_all_brand_sizes,
-            tools::get_project_state,
+            tools::get_project_snapshot_json,
             tools::get_layer_thumbnails,
             tools::get_history_info,
             // MCP
