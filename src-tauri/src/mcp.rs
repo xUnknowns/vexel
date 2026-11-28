@@ -1395,17 +1395,17 @@ fn execute_mcp_layer_tool(
             if let Some(c) = p["color_hex"].as_str() {
                 layer.shadow.color = parse_hex_color(c);
             }
-            if let Some(v) = p["blur"].as_u64() {
-                layer.shadow.blur = v as u32;
+            if let Some(v) = p["blur"].as_f64() {
+                layer.shadow.blur = v as f32;
             }
-            if let Some(v) = p["distance"].as_u64() {
-                layer.shadow.distance = v as u32;
+            if let Some(v) = p["distance"].as_f64() {
+                layer.shadow.distance = v as f32;
             }
             if let Some(v) = p["angle"].as_f64() {
                 layer.shadow.angle = v as f32;
             }
             if let Some(v) = p["opacity"].as_u64() {
-                layer.shadow.opacity = v.min(100) as u8;
+                layer.shadow.opacity = (v.min(100) as f32) / 100.0;
             }
             render_and_respond(s)
         }
@@ -1430,7 +1430,7 @@ fn execute_mcp_layer_tool(
                 glow.color = parse_hex_color(c);
             }
             if let Some(v) = p["intensity"].as_u64() {
-                glow.intensity = (v as u32).clamp(1, 60);
+                glow.intensity = (v as u32).clamp(1, 60) as f32;
             }
             render_and_respond(s)
         }

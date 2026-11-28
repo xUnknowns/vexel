@@ -172,7 +172,6 @@ pub fn open_base_image(
             group_id: None,
             effects: LayerEffects::default(),
             outline: LayerOutline::default(),
-            group_id: None,
             shadow: DropShadow::default(),
             outer_glow: GlowEffect::default(),
             inner_glow: GlowEffect::default(),
@@ -2027,10 +2026,10 @@ pub fn update_layer_shadow(
         .ok_or_else(|| format!("Layer '{}' not found.", layer_id))?;
     layer.shadow.enabled = enabled;
     if let Some(c) = color_hex { layer.shadow.color = hex_to_rgba8(&c); }
-    if let Some(v) = blur { layer.shadow.blur = v; }
-    if let Some(v) = distance { layer.shadow.distance = v; }
+    if let Some(v) = blur { layer.shadow.blur = v as f32; }
+    if let Some(v) = distance { layer.shadow.distance = v as f32; }
     if let Some(v) = angle { layer.shadow.angle = v; }
-    if let Some(v) = opacity { layer.shadow.opacity = v; }
+    if let Some(v) = opacity { layer.shadow.opacity = (v.min(100) as f32) / 100.0; }
     render_and_respond(&mut s)
 }
 
@@ -2052,7 +2051,7 @@ pub fn update_layer_glow(
     let glow = if kind == "inner" { &mut layer.inner_glow } else { &mut layer.outer_glow };
     glow.enabled = enabled;
     if let Some(c) = color_hex { glow.color = hex_to_rgba8(&c); }
-    if let Some(v) = intensity { glow.intensity = v.clamp(1, 60); }
+    if let Some(v) = intensity { glow.intensity = v.clamp(1, 60) as f32; }
     render_and_respond(&mut s)
 }
 
