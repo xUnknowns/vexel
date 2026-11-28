@@ -18,6 +18,7 @@
 
   const clientIcons = {
     claude: Bot,
+    claude_store: Bot,
     lmstudio: Cpu,
     codex: Terminal,
     cursor: Code2,
@@ -155,7 +156,12 @@
               <ClientIcon size={16} strokeWidth={1.75} />
             </div>
             <div class="client-meta">
-              <span class="client-name">{client.name}</span>
+              <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                <span class="client-name">{client.name}</span>
+                {#if client.install_type}
+                  <span class="badge missing">{client.install_type}</span>
+                {/if}
+              </div>
               {#if client.connected}
                 <span class="badge connected">Connected</span>
               {:else if client.outdated}
@@ -214,6 +220,9 @@
     </div>
     <p class="manual-desc">
       For ChatGPT Desktop UI, Perplexity Desktop, or custom MCP clients, copy the command or JSON snippet below:
+    </p>
+    <p class="manual-desc" style="color:#fbbf24;">
+      Si usas Claude Desktop de la Microsoft Store, la ruta de configuración es distinta; usa Settings → Developer → Edit Config.
     </p>
     <div class="copy-row">
       <button class="btn-ghost fw sm" onclick={() => copyText('cmd', snippets.exe_command)}>

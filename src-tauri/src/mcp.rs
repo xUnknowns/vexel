@@ -13,6 +13,7 @@ use tauri::Emitter;
 pub struct AiClientStatus {
     pub id: String,
     pub name: String,
+    pub install_type: String, // "Store (MSIX)" | "Web" | "CLI" | ""
     pub installed: bool,
     pub connected: bool,
     pub outdated: bool,
@@ -203,6 +204,43 @@ fn status_label(installed: bool, connected: bool, outdated: bool) -> String {
     }
 }
 
+/// Find Microsoft Store (MSIX) Claude Desktop package config path without touching WindowsApps.
+/// Looks in `%LOCALAPPDATA%\Packages\Claude_*` (or `Claude*` containing `LocalCache\Roaming\Claude`).
+fn find_claude_store_config(local_appdata: &str) -> Option<std::path::PathBuf> {
+    let packages = std::path::Path::new(local_appdata).join("Packages");
+    let entries = std::fs::read_dir(&packages).ok()?;
+    let mut best: Option<std::path::PathBuf> = None;
+    for entry in entries.flatten() {
+        let pkg_dir = entry.path();
+        if !pkg_dir.is_dir() {
+            continue;
+        }
+        let Some(name) = pkg_dir.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("Claude_") && !name.eq_ignore_ascii_case("Claude") {
+            if !name.starts_with("Claude") {
+                continue;
+            }
+            if !pkg_dir.join("LocalCache").join("Roaming").join("Claude").is_dir() {
+                continue;
+            }
+        }
+        let cfg = pkg_dir
+            .join("LocalCache")
+            .join("Roaming")
+            .join("Claude")
+            .join("claude_desktop_config.json");
+        if cfg.is_file() {
+            return Some(cfg);
+        }
+        if best.is_none() {
+            best = Some(cfg);
+        }
+    }
+    best
+}
+
 #[tauri::command]
 pub fn scan_desktop_ai_clients() -> Vec<AiClientStatus> {
     let appdata = appdata_dir();
@@ -210,10 +248,10 @@ pub fn scan_desktop_ai_clients() -> Vec<AiClientStatus> {
     let userprofile = userprofile_dir();
     let cur_exe = current_exe_norm();
 
-    let claude_cfg = std::path::Path::new(&appdata)
+    let claude_classic_cfg = std::path::Path::new(&appdata)
         .join("Claude")
         .join("claude_desktop_config.json");
-    let claude_installed = has_exe_in_dir(
+    let claude_classic_installed = has_exe_in_dir(
         &std::path::Path::new(&local_appdata).join("AnthropicClaude"),
         &["claude.exe", "Claude.exe"],
     ) || has_exe_in_dir(
@@ -221,7 +259,64 @@ pub fn scan_desktop_ai_clients() -> Vec<AiClientStatus> {
         &["Claude.exe", "claude.exe"],
     ) || std::path::Path::new(r"C:\Program Files\Claude\Claude.exe").is_file()
         || uninstall_reg_has("Claude");
-    let (claude_conn, claude_out) = json_veltrax_status(&claude_cfg, &cur_exe);
+
+    let claude_store_cfg = find_claude_store_config(&local_appdata);
+    let claude_store_installed = claude_store_cfg.is_some();
+
+    let mut out = Vec::new();
+
+    if claude_store_installed && claude_classic_installed {
+        // Both installed: expose both clearly (Store + Web)
+        let store_path = claude_store_cfg.unwrap();
+        let (sc, so) = json_veltrax_status(&store_path, &cur_exe);
+        out.push(AiClientStatus {
+            id: "claude_store".to_string(),
+            name: "Claude Desktop".to_string(),
+            install_type: "Store (MSIX)".to_string(),
+            installed: true,
+            connected: sc,
+            outdated: so,
+            status: status_label(true, sc, so),
+            config_path: store_path.display().to_string(),
+        });
+        let (cc, co) = json_veltrax_status(&claude_classic_cfg, &cur_exe);
+        out.push(AiClientStatus {
+            id: "claude".to_string(),
+            name: "Claude Desktop".to_string(),
+            install_type: "Web".to_string(),
+            installed: true,
+            connected: cc,
+            outdated: co,
+            status: status_label(true, cc, co),
+            config_path: claude_classic_cfg.display().to_string(),
+        });
+    } else if let Some(store_path) = claude_store_cfg {
+        // Store (MSIX) installation detected
+        let (sc, so) = json_veltrax_status(&store_path, &cur_exe);
+        out.push(AiClientStatus {
+            id: "claude".to_string(),
+            name: "Claude Desktop".to_string(),
+            install_type: "Store (MSIX)".to_string(),
+            installed: true,
+            connected: sc,
+            outdated: so,
+            status: status_label(true, sc, so),
+            config_path: store_path.display().to_string(),
+        });
+    } else {
+        // Classic (Web) or not detected
+        let (cc, co) = json_veltrax_status(&claude_classic_cfg, &cur_exe);
+        out.push(AiClientStatus {
+            id: "claude".to_string(),
+            name: "Claude Desktop".to_string(),
+            install_type: if claude_classic_installed { "Web".to_string() } else { String::new() },
+            installed: claude_classic_installed,
+            connected: cc,
+            outdated: co,
+            status: status_label(claude_classic_installed, cc, co),
+            config_path: claude_classic_cfg.display().to_string(),
+        });
+    }
 
     let lmstudio_cfg = std::path::Path::new(&userprofile).join(".lmstudio").join("mcp.json");
     let lmstudio_installed = has_exe_in_dir(
@@ -233,14 +328,46 @@ pub fn scan_desktop_ai_clients() -> Vec<AiClientStatus> {
     ) || std::path::Path::new(r"C:\Program Files\LM Studio\LM Studio.exe").is_file()
         || uninstall_reg_has("LM Studio");
     let (lm_conn, lm_out) = json_veltrax_status(&lmstudio_cfg, &cur_exe);
+    out.push(AiClientStatus {
+        id: "lmstudio".to_string(),
+        name: "LM Studio".to_string(),
+        install_type: if lmstudio_installed { "Desktop".to_string() } else { String::new() },
+        installed: lmstudio_installed,
+        connected: lm_conn,
+        outdated: lm_out,
+        status: status_label(lmstudio_installed, lm_conn, lm_out),
+        config_path: lmstudio_cfg.display().to_string(),
+    });
 
-    let codex_cfg = std::path::Path::new(&userprofile).join(".codex").join("config.toml");
+    let codex_cfg = [
+        std::path::Path::new(&userprofile).join(".codex").join("config.toml"),
+        std::path::Path::new(&appdata).join("codex").join("config.toml"),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
+    .unwrap_or_else(|| std::path::Path::new(&userprofile).join(".codex").join("config.toml"));
     let codex_installed = cmd_in_path("codex")
         || std::path::Path::new(&appdata).join("npm").join("codex.cmd").is_file()
         || std::path::Path::new(&userprofile).join(".cargo").join("bin").join("codex.exe").is_file();
     let (codex_conn, codex_out) = toml_veltrax_status(&codex_cfg, &cur_exe);
+    out.push(AiClientStatus {
+        id: "codex".to_string(),
+        name: "ChatGPT / Codex".to_string(),
+        install_type: if codex_installed { "CLI".to_string() } else { String::new() },
+        installed: codex_installed,
+        connected: codex_conn,
+        outdated: codex_out,
+        status: status_label(codex_installed, codex_conn, codex_out),
+        config_path: codex_cfg.display().to_string(),
+    });
 
-    let cursor_cfg = std::path::Path::new(&userprofile).join(".cursor").join("mcp.json");
+    let cursor_cfg = [
+        std::path::Path::new(&userprofile).join(".cursor").join("mcp.json"),
+        std::path::Path::new(&appdata).join("Cursor").join("User").join("globalStorage").join("mcp.json"),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
+    .unwrap_or_else(|| std::path::Path::new(&userprofile).join(".cursor").join("mcp.json"));
     let cursor_installed = has_exe_in_dir(
         &std::path::Path::new(&local_appdata).join("Programs").join("cursor"),
         &["Cursor.exe"],
@@ -250,45 +377,18 @@ pub fn scan_desktop_ai_clients() -> Vec<AiClientStatus> {
     ) || std::path::Path::new(r"C:\Program Files\cursor\Cursor.exe").is_file()
         || uninstall_reg_has("Cursor");
     let (cursor_conn, cursor_out) = json_veltrax_status(&cursor_cfg, &cur_exe);
+    out.push(AiClientStatus {
+        id: "cursor".to_string(),
+        name: "Cursor".to_string(),
+        install_type: if cursor_installed { "Desktop".to_string() } else { String::new() },
+        installed: cursor_installed,
+        connected: cursor_conn,
+        outdated: cursor_out,
+        status: status_label(cursor_installed, cursor_conn, cursor_out),
+        config_path: cursor_cfg.display().to_string(),
+    });
 
-    vec![
-        AiClientStatus {
-            id: "claude".to_string(),
-            name: "Claude Desktop".to_string(),
-            installed: claude_installed,
-            connected: claude_conn,
-            outdated: claude_out,
-            status: status_label(claude_installed, claude_conn, claude_out),
-            config_path: claude_cfg.display().to_string(),
-        },
-        AiClientStatus {
-            id: "lmstudio".to_string(),
-            name: "LM Studio".to_string(),
-            installed: lmstudio_installed,
-            connected: lm_conn,
-            outdated: lm_out,
-            status: status_label(lmstudio_installed, lm_conn, lm_out),
-            config_path: lmstudio_cfg.display().to_string(),
-        },
-        AiClientStatus {
-            id: "codex".to_string(),
-            name: "ChatGPT / Codex".to_string(),
-            installed: codex_installed,
-            connected: codex_conn,
-            outdated: codex_out,
-            status: status_label(codex_installed, codex_conn, codex_out),
-            config_path: codex_cfg.display().to_string(),
-        },
-        AiClientStatus {
-            id: "cursor".to_string(),
-            name: "Cursor".to_string(),
-            installed: cursor_installed,
-            connected: cursor_conn,
-            outdated: cursor_out,
-            status: status_label(cursor_installed, cursor_conn, cursor_out),
-            config_path: cursor_cfg.display().to_string(),
-        },
-    ]
+    out
 }
 
 fn backup_existing_file(path: &std::path::Path) -> Result<(), String> {
@@ -353,7 +453,7 @@ pub fn connect_ai_client(client_id: String) -> Result<String, String> {
 
     let cfg = std::path::PathBuf::from(&client.config_path);
     match client_id.as_str() {
-        "claude" | "lmstudio" | "cursor" => {
+        "claude" | "claude_store" | "lmstudio" | "cursor" => {
             write_json_mcp_entry(&cfg, &exe_str)?;
             Ok(format!("Connected to {} ({})", client.name, cfg.display()))
         }
@@ -403,31 +503,31 @@ pub fn connect_ai_client(client_id: String) -> Result<String, String> {
 
 #[tauri::command]
 pub fn disconnect_ai_client(client_id: String) -> Result<String, String> {
-    let appdata = appdata_dir();
-    let userprofile = userprofile_dir();
+    let clients = scan_desktop_ai_clients();
+    let cfg = clients
+        .iter()
+        .find(|c| c.id == client_id)
+        .map(|c| std::path::PathBuf::from(&c.config_path))
+        .ok_or_else(|| format!("Unknown AI client '{}'", client_id))?;
 
     match client_id.as_str() {
-        "claude" | "lmstudio" | "cursor" => {
-            let cfg = match client_id.as_str() {
-                "claude" => std::path::Path::new(&appdata).join("Claude").join("claude_desktop_config.json"),
-                "lmstudio" => std::path::Path::new(&userprofile).join(".lmstudio").join("mcp.json"),
-                _ => std::path::Path::new(&userprofile).join(".cursor").join("mcp.json"),
-            };
+        "claude" | "claude_store" | "lmstudio" | "cursor" => {
             if cfg.is_file() {
-                let raw = std::fs::read_to_string(&cfg).unwrap_or_default();
-                if let Ok(mut v) = serde_json::from_str::<Value>(&raw) {
-                    if let Some(obj) = v.get_mut("mcpServers").and_then(|s| s.as_object_mut()) {
-                        obj.remove("veltrax-studios");
-                        let pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
-                        std::fs::write(&cfg, pretty).map_err(|e| e.to_string())?;
-                    }
+                backup_existing_file(&cfg)?;
+                let raw = std::fs::read_to_string(&cfg).map_err(|e| e.to_string())?;
+                let mut v: Value = serde_json::from_str(&raw)
+                    .map_err(|e| format!("Existing config JSON is invalid ({}); aborting.", e))?;
+                if let Some(obj) = v.get_mut("mcpServers").and_then(|s| s.as_object_mut()) {
+                    obj.remove("veltrax-studios");
+                    let pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+                    std::fs::write(&cfg, pretty).map_err(|e| e.to_string())?;
                 }
             }
             Ok(format!("Disconnected {}", client_id))
         }
         "codex" => {
-            let cfg = std::path::Path::new(&userprofile).join(".codex").join("config.toml");
             if cfg.is_file() {
+                backup_existing_file(&cfg)?;
                 let raw = std::fs::read_to_string(&cfg).unwrap_or_default();
                 let mut out = String::new();
                 let mut skipping = false;
@@ -507,12 +607,15 @@ pub struct McpRealStatus {
 pub fn check_mcp_real_status() -> McpRealStatus {
     let bridge_online = ureq::get("http://127.0.0.1:3847/health").call().is_ok();
 
-    let appdata = std::env::var("APPDATA")
-        .unwrap_or_else(|_| r"C:\Users\Public\AppData\Roaming".to_string());
-    let config_path = std::path::Path::new(&appdata)
-        .join("Claude")
-        .join("claude_desktop_config.json");
-    let config_path_str = config_path.display().to_string();
+    let clients = scan_desktop_ai_clients();
+    let claude_client = clients
+        .iter()
+        .find(|c| (c.id == "claude" || c.id == "claude_store") && c.connected)
+        .or_else(|| clients.iter().find(|c| c.id == "claude" || c.id == "claude_store"));
+    let config_path_str = claude_client
+        .map(|c| c.config_path.clone())
+        .unwrap_or_default();
+    let config_path = std::path::PathBuf::from(&config_path_str);
 
     let mut exe_path_str = String::new();
     let mut config_valid = false;
