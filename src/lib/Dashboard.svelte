@@ -13,6 +13,8 @@
     hasProject = false,
     autosaveOffer = null,
     startupWarning = '',
+    appVersion = '…',
+    feedbackStatus = '',
     onSelectTemplate,
     onImportTemplate,
     onRecoverAutosave,
@@ -27,7 +29,8 @@
     onShowModal,
     onOpenFile,
     onLoadRecent,
-    onCreatePreset
+    onCreatePreset,
+    onSendFeedback
   } = $props();
 
   let subView = $state('home'); // 'home' | 'mcp'
@@ -123,7 +126,7 @@
     </nav>
 
     <div class="sidebar-footer">
-      <span class="ver-tag" title="Veltrax Studios v1.0">v1.0</span>
+      <span class="ver-tag" title={`Veltrax Studios v${appVersion} · Beta`}><span>Beta</span><br /><span>v{appVersion}</span></span>
       <div class="engine-dot" title="Rust layer engine online"></div>
     </div>
   </aside>
@@ -155,6 +158,10 @@
           <img src="/logos/veltrax-logo-banner-dark.png" alt="Veltrax Studios" class="hero-banner" />
           <h1 class="hero-title">What will you create today?</h1>
           <p class="hero-sub">Build YouTube thumbnails, transparent PNG logos, and layered edits in Veltrax Studios.</p>
+          <div class="feedback-row">
+            <button class="btn-ghost sm" onclick={onSendFeedback}>Enviar sugerencia / reportar error</button>
+            {#if feedbackStatus}<span class="feedback-status">{feedbackStatus}</span>{/if}
+          </div>
 
           <div class="quick-row">
             {#each quickPresets as item}
@@ -310,7 +317,7 @@
   .g-nav-label { font-size:10px; font-weight:500; letter-spacing:0.01em; }
 
   .sidebar-footer { margin-top:auto; display:flex; flex-direction:column; align-items:center; gap:6px; }
-  .ver-tag { font-size:10px; font-weight:600; color:var(--text-muted); }
+  .ver-tag { font-size:10px; font-weight:600; color:var(--text-muted); text-align:center; line-height:1.25; }
   .engine-dot { width:8px; height:8px; border-radius:50%; background:#10b981; box-shadow:0 0 8px rgba(16,185,129,0.6); }
 
   .d-main { flex:1; min-width:0; overflow:hidden; display:flex; flex-direction:column; }
@@ -319,6 +326,8 @@
   .hero { display:flex; flex-direction:column; gap:20px; }
   .hero-title { font-size:30px; font-weight:700; color:var(--text-primary); letter-spacing:-0.5px; }
   .hero-sub { font-size:14px; color:var(--text-secondary); margin-top:-12px; }
+  .feedback-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .feedback-status { font-size:11px; color:var(--text-muted); }
 
   .quick-row { display:flex; gap:14px; flex-wrap:wrap; }
   .quick-btn {

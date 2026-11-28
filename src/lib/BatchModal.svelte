@@ -16,6 +16,7 @@
   let progress = $state(null);
   let summary = $state(null);
   let errorMsg = $state('');
+  let activeJobId = $state('');
 
   $effect(() => {
     if (show && !selectedTemplateId && templates.length > 0) {
@@ -25,7 +26,7 @@
 
   $effect(() => {
     const unlisten = listen('batch-progress', (ev) => {
-      progress = ev.payload;
+      if (ev.payload?.job_id === activeJobId) progress = ev.payload;
     });
     return () => {
       unlisten.then((fn) => fn());
@@ -44,11 +45,13 @@
       if (!destDir) return;
     }
     running = true;
+    activeJobId = crypto.randomUUID();
     errorMsg = '';
     summary = null;
     progress = null;
     try {
       summary = await invoke('batch_render_template', {
+        jobId: activeJobId,
         templateId: selectedTemplateId,
         tableData,
         filenamePattern,
@@ -64,12 +67,12 @@
   }
 
   function cancelBatch() {
-    invoke('cancel_batch_export').catch(() => {});
+    if (activeJobId) invoke('cancel_batch_export', { jobId: activeJobId }).catch(() => {});
   }
 </script>
 
 {#if show}
-  <div class="backdrop" onclick={onClose} role="presentation">
+  <div class="backdrop" onclick={(e) => { if (!running && e.target === e.currentTarget) onClose(); }} role="presentation">
     <div class="modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Batch Generator">
       <div class="modal-header">
         <span class="modal-title"><Layers size={15} strokeWidth={2} /> Batch Template Generator</span>

@@ -23,10 +23,11 @@
   let batchMode = $state(false);
   let batchSelected = $state(['yt_thumb', 'ig_post', 'tiktok']);
   let batchProgress = $state(null); // { done, total, current_item, finished, canceled, saved, errors }
+  let activeJobId = $state('');
 
   $effect(() => {
     const unlisten = listen('batch-progress', (ev) => {
-      batchProgress = ev.payload;
+      if (ev.payload?.job_id === activeJobId) batchProgress = ev.payload;
     });
     return () => {
       unlisten.then((fn) => fn());
@@ -82,6 +83,7 @@
   async function handleBatchSave() {
     if (!hasProject || saving || batchSelected.length === 0) return;
     saving = true;
+    activeJobId = crypto.randomUUID();
     feedback = '';
     batchProgress = null;
     try {
@@ -98,6 +100,7 @@
           height: p.h ?? Math.max(1, Math.round(imgHeight * p.scale)),
         }));
       const summary = await invoke('export_multi_size_async', {
+        jobId: activeJobId,
         destDir,
         baseName: fileName || 'export',
         format,
@@ -120,7 +123,7 @@
   }
 
   function handleCancelBatch() {
-    invoke('cancel_batch_export').catch(() => {});
+    if (activeJobId) invoke('cancel_batch_export', { jobId: activeJobId }).catch(() => {});
   }
 
   async function handleExportBrandSizes() {
@@ -198,7 +201,7 @@
 <svelte:window onkeydown={handleKeydown} />
 
 {#if show}
-  <div class="backdrop" onclick={onClose} role="presentation">
+  <div class="backdrop" onclick={(e) => { if (!saving && e.target === e.currentTarget) onClose(); }} role="presentation">
     <div class="modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Export Image">
       <div class="modal-header">
         <span class="modal-title"><Download size={15} strokeWidth={2} /> Export Image</span>

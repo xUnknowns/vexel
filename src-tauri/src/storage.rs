@@ -8,14 +8,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 pub fn user_data_root() -> PathBuf {
-    let appdata = std::env::var("APPDATA")
-        .unwrap_or_else(|_| r"C:\Users\Public\AppData\Roaming".to_string());
+    let appdata =
+        std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\Public\AppData\Roaming".to_string());
     Path::new(&appdata).join("Veltrax Studios")
 }
 
 pub fn ensure_subdir(name: &str) -> Result<PathBuf, String> {
     let dir = user_data_root().join(name);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create '{}': {}", dir.display(), e))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create '{}': {}", dir.display(), e))?;
     Ok(dir)
 }
 
@@ -58,7 +59,12 @@ pub fn atomic_write_bytes(dest: &Path, bytes: &[u8]) -> Result<(), String> {
         let _ = std::fs::remove_file(dest);
         if let Err(e2) = std::fs::rename(&tmp_path, dest) {
             let _ = std::fs::remove_file(&tmp_path);
-            return Err(format!("Atomic rename failed ({}; {}): {}", e, e2, dest.display()));
+            return Err(format!(
+                "Atomic rename failed ({}; {}): {}",
+                e,
+                e2,
+                dest.display()
+            ));
         }
     }
     Ok(())
@@ -73,7 +79,10 @@ pub fn quarantine_corrupt_file(path: &Path) -> Option<String> {
     if !path.is_file() {
         return None;
     }
-    let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("file.json");
+    let fname = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file.json");
     let corrupt_path = path.with_file_name(format!("{}.corrupt.{}", fname, now_unix_secs()));
     if std::fs::rename(path, &corrupt_path).is_ok() {
         Some(corrupt_path.to_string_lossy().to_string())
@@ -100,14 +109,20 @@ pub fn load_json_or_quarantine<T: for<'de> Deserialize<'de> + Default>(
                         "{} estaba corrupto ({}) y se movió a {} para no perder datos.",
                         label, e, cp
                     ),
-                    None => format!("{} estaba corrupto ({}) y se usaron valores por defecto.", label, e),
+                    None => format!(
+                        "{} estaba corrupto ({}) y se usaron valores por defecto.",
+                        label, e
+                    ),
                 };
                 (T::default(), Some(msg))
             }
         },
         Err(e) => (
             T::default(),
-            Some(format!("No se pudo leer {} ({}); usando valores por defecto.", label, e)),
+            Some(format!(
+                "No se pudo leer {} ({}); usando valores por defecto.",
+                label, e
+            )),
         ),
     }
 }
@@ -122,6 +137,8 @@ pub struct AppSettings {
     pub last_export_format: String,
     pub last_export_dir: String,
     pub recent_presets: Vec<String>,
+    #[serde(default)]
+    pub last_seen_version: Option<String>,
     #[serde(default = "default_true")]
     pub show_splash: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -136,6 +153,7 @@ impl Default for AppSettings {
             last_export_format: "png".to_string(),
             last_export_dir: String::new(),
             recent_presets: Vec::new(),
+            last_seen_version: None,
             show_splash: true,
             corrupt_warning: None,
         }
@@ -190,7 +208,13 @@ pub struct RecentStore {
 fn sanitize_slug(s: &str) -> String {
     let clean: String = s
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let trimmed = clean.trim_matches('_');
     if trimmed.is_empty() {
@@ -214,14 +238,22 @@ pub fn copy_asset_into_project(project_id: &str, source_path: &str) -> Result<St
     }
     let assets_dir = project_assets_dir(project_id)?;
     // Already inside this project's assets dir?
-    if let (Ok(canon_src), Ok(canon_dir)) = (std::fs::canonicalize(src), std::fs::canonicalize(&assets_dir)) {
+    if let (Ok(canon_src), Ok(canon_dir)) = (
+        std::fs::canonicalize(src),
+        std::fs::canonicalize(&assets_dir),
+    ) {
         if canon_src.starts_with(&canon_dir) {
             return Ok(source_path.to_string());
         }
     }
     let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("png");
     let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("asset");
-    let dest = assets_dir.join(format!("{}_{}.{}", sanitize_slug(stem), now_unix_millis(), ext));
+    let dest = assets_dir.join(format!(
+        "{}_{}.{}",
+        sanitize_slug(stem),
+        now_unix_millis(),
+        ext
+    ));
     std::fs::copy(src, &dest)
         .map_err(|e| format!("Failed to copy asset '{}' into project: {}", source_path, e))?;
     Ok(dest.to_string_lossy().to_string())
@@ -507,7 +539,8 @@ pub fn export_user_data_zip(dest_zip: String) -> Result<String, String> {
         for json_file in ["brand_kit.json", "settings.json", "recent.json"] {
             let p = root.join(json_file);
             if p.is_file() {
-                zip.start_file(json_file, options).map_err(|e| e.to_string())?;
+                zip.start_file(json_file, options)
+                    .map_err(|e| e.to_string())?;
                 let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
                 zip.write_all(&bytes).map_err(|e| e.to_string())?;
             }

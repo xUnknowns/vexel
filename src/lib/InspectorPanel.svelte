@@ -476,6 +476,7 @@
               Reset Mask
             </button>
           </div>
+          <p class="privacy-hint">La primera vez, el modelo se descarga de GitHub solo cuando solicitas esta acción. La imagen se procesa localmente y no se sube.</p>
         {/if}
       </div>
 
@@ -981,6 +982,7 @@
   .insp-type { font-size:10px; color:#38bdf8; background:rgba(56,189,248,0.12); padding:2px 6px; border-radius:4px; flex-shrink:0; }
   .insp-scroll { flex:1; overflow-y:auto; padding:8px 12px 24px; display:flex; flex-direction:column; gap:6px; }
   .insp-empty { font-size:12px; color:var(--text-muted); padding:16px 4px; text-align:center; }
+  .privacy-hint { margin:0; color:var(--text-muted); font-size:10px; line-height:1.5; }
 
   .sec { border-bottom:1px solid var(--border); padding:8px 0 12px; display:flex; flex-direction:column; gap:9px; }
   .sec:last-child { border-bottom:none; }

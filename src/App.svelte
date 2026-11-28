@@ -24,6 +24,10 @@
   let recentProjects = $state([]);
   let autosaveOffer = $state(null);
   let startupWarning = $state('');
+  let appVersion = $state('…');
+  let appSettings = $state(null);
+  let showWhatsNew = $state(false);
+  let feedbackStatus = $state('');
 
   let showSplash = $state(true);
   let appReady = $state(false);
@@ -76,8 +80,13 @@
     splashProgress = 25;
     try {
       const s = await invoke('get_app_settings');
+      appSettings = s;
       if (s?.corrupt_warning) startupWarning = s.corrupt_warning;
       if (s && s.show_splash === false) showSplash = false;
+    } catch {}
+    try {
+      appVersion = await invoke('get_app_version');
+      showWhatsNew = appSettings?.last_seen_version !== appVersion;
     } catch {}
 
     splashStatus = 'Loading recent projects…';
@@ -111,18 +120,85 @@
   });
 
   $effect(() => {
+    const onWebviewError = (event) => {
+      invoke('record_local_error', {
+        source: 'webview',
+        errorMessage: String(event.message || 'Uncaught WebView error'),
+      }).catch(() => {});
+    };
+    const onUnhandledRejection = (event) => {
+      invoke('record_local_error', {
+        source: 'unhandled_promise',
+        errorMessage: String(event.reason ?? 'Unhandled promise rejection'),
+      }).catch(() => {});
+    };
+    window.addEventListener('error', onWebviewError);
+    window.addEventListener('unhandledrejection', onUnhandledRejection);
+    return () => {
+      window.removeEventListener('error', onWebviewError);
+      window.removeEventListener('unhandledrejection', onUnhandledRejection);
+    };
+  });
+
+  $effect(() => {
     const unlisten = listen('mcp-project-updated', (event) => {
       project = event.payload;
       cacheBuster += 1;
     });
+    const unlistenCreated = listen('mcp-project-created', (event) => {
+      project = event.payload;
+      cacheBuster += 1;
+      showCreateModal = false;
+      view = 'editor';
+    });
     return () => {
       unlisten.then((fn) => fn());
+      unlistenCreated.then((fn) => fn());
     };
   });
 
   function applyProjectUpdate(resp) {
     project = resp;
     cacheBuster += 1;
+  }
+
+  async function dismissWhatsNew() {
+    showWhatsNew = false;
+    if (!appSettings || !appVersion) return;
+    appSettings = { ...appSettings, last_seen_version: appVersion };
+    try {
+      await invoke('save_app_settings', { settings: appSettings });
+    } catch (e) {
+      startupWarning = `No se pudo guardar la versión vista en Novedades: ${e}`;
+    }
+  }
+
+  async function sendFeedback() {
+    feedbackStatus = '';
+    try {
+      const diagnostics = await invoke('get_feedback_diagnostics', {
+        screenWidth: window.screen?.width ?? null,
+        screenHeight: window.screen?.height ?? null,
+      });
+      try {
+        await navigator.clipboard.writeText(diagnostics);
+      } catch {
+        const temporaryField = document.createElement('textarea');
+        temporaryField.value = diagnostics;
+        temporaryField.setAttribute('readonly', '');
+        temporaryField.style.position = 'fixed';
+        temporaryField.style.opacity = '0';
+        document.body.appendChild(temporaryField);
+        temporaryField.select();
+        const copied = document.execCommand('copy');
+        temporaryField.remove();
+        if (!copied) throw new Error('El portapapeles rechazó la copia del diagnóstico.');
+      }
+      const message = await invoke('open_feedback_site');
+      feedbackStatus = `${message} El diagnóstico quedó en el portapapeles y no se envió.`;
+    } catch (e) {
+      feedbackStatus = `No se pudo completar feedback: ${e}`;
+    }
   }
 
   async function loadImage(filePath) {
@@ -234,6 +310,8 @@
     {hasProject}
     {autosaveOffer}
     {startupWarning}
+    {appVersion}
+    {feedbackStatus}
     onSelectTemplate={(tpl) => (activeTemplate = tpl)}
     onImportTemplate={handleImportVTemplate}
     onRecoverAutosave={handleRecoverAutosave}
@@ -249,6 +327,7 @@
     onOpenFile={handleOpenFile}
     onLoadRecent={loadImage}
     onCreatePreset={handleCreatePreset}
+    onSendFeedback={sendFeedback}
   />
   <CreateModal
     show={showCreateModal}
@@ -294,3 +373,29 @@
     onClose={() => (showBatchModal = false)}
   />
 {/if}
+
+{#if showWhatsNew}
+  <div class="whats-new-backdrop" role="presentation">
+    <section class="whats-new-card" role="dialog" aria-modal="true" aria-labelledby="whats-new-title" tabindex="-1">
+      <div class="whats-new-label">Veltrax Studios · Beta v{appVersion}</div>
+      <h2 id="whats-new-title">Novedades</h2>
+      <ul>
+        <li>Preparación para beta pública: diagnóstico local con datos técnicos redactados.</li>
+        <li>Registro rotativo y recuperación local del estado ante pánicos de Rust.</li>
+        <li>La descarga del modelo para quitar fondos solo comienza cuando solicitas esa acción.</li>
+      </ul>
+      <p>No se envían diagnósticos ni imágenes automáticamente.</p>
+      <button class="whats-new-button" onclick={dismissWhatsNew}>Entendido</button>
+    </section>
+  </div>
+{/if}
+
+<style>
+  .whats-new-backdrop { position:fixed; inset:0; z-index:4000; display:grid; place-items:center; padding:24px; background:rgba(0,0,0,.72); backdrop-filter:blur(5px); }
+  .whats-new-card { width:min(480px,96vw); padding:24px; border:1px solid var(--border-active); border-radius:var(--r-xl); background:var(--bg-card); color:var(--text-primary); box-shadow:0 28px 80px rgba(0,0,0,.55); }
+  .whats-new-label { color:#7dd3fc; font-size:11px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }
+  .whats-new-card h2 { margin:10px 0 14px; font-size:23px; }
+  .whats-new-card ul { padding-left:20px; color:var(--text-secondary); font-size:13px; line-height:1.7; }
+  .whats-new-card p { margin:14px 0; color:var(--text-muted); font-size:12px; }
+  .whats-new-button { float:right; padding:9px 16px; border:0; border-radius:var(--r-sm); background:var(--accent); color:white; font-weight:700; cursor:pointer; }
+</style>

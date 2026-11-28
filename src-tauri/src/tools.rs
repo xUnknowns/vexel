@@ -6,6 +6,7 @@ use crate::layers::{
 };
 use image::imageops::FilterType;
 use std::path::Path;
+use tract_onnx::prelude::Framework;
 
 fn next_preview_path() -> String {
     let dir = std::env::temp_dir();
@@ -19,6 +20,11 @@ fn next_preview_path() -> String {
 }
 
 pub fn render_and_respond(state: &mut ProjectState) -> Result<ProjectResponse, String> {
+    crate::support::cache_recovery_snapshot(
+        &state.current,
+        state.project_file_path.clone(),
+        state.has_project,
+    );
     let dest = next_preview_path();
     render_project_composite(&mut state.current, &dest)?;
     state.preview_path = dest;
@@ -26,8 +32,8 @@ pub fn render_and_respond(state: &mut ProjectState) -> Result<ProjectResponse, S
 }
 
 pub fn internal_get_preview_base64(source_path: &str) -> Result<(String, u32, u32), String> {
-    let img = image::open(source_path)
-        .map_err(|e| format!("Failed to open '{}': {}", source_path, e))?;
+    let img =
+        image::open(source_path).map_err(|e| format!("Failed to open '{}': {}", source_path, e))?;
     let (w, h) = (img.width(), img.height());
     let preview = if w > 800 {
         let scale = 800.0 / w as f32;
@@ -96,17 +102,26 @@ fn auto_project_file_path(project_name: &str, project_id: &str) -> Result<String
     let dir = crate::storage::ensure_subdir("projects")?;
     let slug: String = project_name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let trimmed = slug.trim_matches('_');
-    let base = if trimmed.is_empty() { "project" } else { trimmed };
+    let base = if trimmed.is_empty() {
+        "project"
+    } else {
+        trimmed
+    };
     let path = dir.join(format!("{}_{}.veltrax", base, project_id));
     Ok(path.to_string_lossy().to_string())
 }
 
-#[tauri::command]
-pub fn create_project(
-    state: tauri::State<'_, SharedProjectState>,
+pub fn create_project_from_state(
+    state: &SharedProjectState,
     width: u32,
     height: u32,
     transparent_bg: bool,
@@ -115,7 +130,9 @@ pub fn create_project(
     if width == 0 || height == 0 {
         return Err("Canvas width and height must be greater than zero.".to_string());
     }
-    let pname = project_name.unwrap_or_else(|| "Untitled Design".to_string());
+    let pname = project_name
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| "Untitled Design".to_string());
     let pid = format!("proj_{}", crate::storage::now_unix_millis());
     let proj_path = auto_project_file_path(&pname, &pid)?;
 
@@ -142,13 +159,24 @@ pub fn create_project(
         layers: Vec::new(),
         groups: Vec::new(),
     };
-    if let Ok(json) = serde_json::to_string_pretty(&s.current) {
-        let _ = crate::storage::atomic_write_str(Path::new(&proj_path), &json);
-    }
+    let json = serde_json::to_string_pretty(&s.current).map_err(|e| e.to_string())?;
+    crate::storage::atomic_write_str(Path::new(&proj_path), &json)
+        .map_err(|e| format!("Failed to save new project: {}", e))?;
     crate::storage::write_session_lock();
     let resp = render_and_respond(&mut s)?;
     let _ = crate::storage::record_recent_project(&proj_path, &s.current, None);
     Ok(resp)
+}
+
+#[tauri::command]
+pub fn create_project(
+    state: tauri::State<'_, SharedProjectState>,
+    width: u32,
+    height: u32,
+    transparent_bg: bool,
+    project_name: Option<String>,
+) -> Result<ProjectResponse, String> {
+    create_project_from_state(state.inner(), width, height, transparent_bg, project_name)
 }
 
 #[tauri::command]
@@ -229,8 +257,6 @@ pub fn open_base_image(
     Ok(resp)
 }
 
-
-
 // ── Layer Creation & Manipulation ───────────────────────────────────────────
 
 #[tauri::command]
@@ -291,8 +317,6 @@ pub fn add_image_overlay_layer(
     render_and_respond(&mut s)
 }
 
-
-
 #[tauri::command]
 pub fn remove_layer_background_color(
     state: tauri::State<'_, SharedProjectState>,
@@ -323,8 +347,6 @@ pub fn remove_layer_background_color(
     }
     render_and_respond(&mut s)
 }
-
-
 
 #[tauri::command]
 pub fn add_text_layer(
@@ -399,12 +421,8 @@ pub fn add_text_layer(
     render_and_respond(&mut s)
 }
 
-
-
 #[tauri::command]
-pub fn push_undo_checkpoint(
-    state: tauri::State<'_, SharedProjectState>,
-) -> Result<(), String> {
+pub fn push_undo_checkpoint(state: tauri::State<'_, SharedProjectState>) -> Result<(), String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
     if s.has_project {
         s.push_undo();
@@ -491,8 +509,6 @@ pub fn update_text_layer(
     render_and_respond(&mut s)
 }
 
-
-
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn update_shape_layer(
@@ -569,7 +585,11 @@ pub fn update_shape_layer(
                     .map(hex_to_rgba8)
                     .unwrap_or(cur.to_color);
                 let angle = fill_gradient_angle.unwrap_or(cur.angle);
-                *fg = Some(BgGradient { from_color, to_color, angle });
+                *fg = Some(BgGradient {
+                    from_color,
+                    to_color,
+                    angle,
+                });
             } else if let Some(ang) = fill_gradient_angle {
                 if let Some(g) = fg {
                     g.angle = ang;
@@ -580,8 +600,6 @@ pub fn update_shape_layer(
     }
     render_and_respond(&mut s)
 }
-
-
 
 #[tauri::command]
 pub fn replace_image_layer(
@@ -621,8 +639,6 @@ pub fn replace_image_layer(
     render_and_respond(&mut s)
 }
 
-
-
 #[tauri::command]
 pub fn crop_canvas(
     state: tauri::State<'_, SharedProjectState>,
@@ -647,8 +663,6 @@ pub fn crop_canvas(
     }
     render_and_respond(&mut s)
 }
-
-
 
 #[tauri::command]
 pub fn add_shape_layer(
@@ -702,7 +716,10 @@ pub fn add_shape_layer(
             height: height.max(4),
             fill_color: parse_hex_color(&fill_hex),
             border_radius,
-            border_color: border_hex.as_deref().map(parse_hex_color).unwrap_or([0, 0, 0, 0]),
+            border_color: border_hex
+                .as_deref()
+                .map(parse_hex_color)
+                .unwrap_or([0, 0, 0, 0]),
             border_width: border_width.unwrap_or(0),
             sides: 5,
             corner_radii: None,
@@ -711,8 +728,6 @@ pub fn add_shape_layer(
     });
     render_and_respond(&mut s)
 }
-
-
 
 #[tauri::command]
 pub fn add_gradient_layer(
@@ -763,8 +778,6 @@ pub fn add_gradient_layer(
     });
     render_and_respond(&mut s)
 }
-
-
 
 #[tauri::command]
 pub fn add_watermark_layer(
@@ -826,8 +839,6 @@ pub fn add_watermark_layer(
     render_and_respond(&mut s)
 }
 
-
-
 #[tauri::command]
 pub fn set_canvas_background(
     state: tauri::State<'_, SharedProjectState>,
@@ -856,8 +867,6 @@ pub fn set_canvas_background(
     }
     render_and_respond(&mut s)
 }
-
-
 
 #[tauri::command]
 pub fn update_layer_transform(
@@ -892,8 +901,6 @@ pub fn update_layer_transform(
     layer.blend_mode = blend_mode;
     render_and_respond(&mut s)
 }
-
-
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -931,19 +938,25 @@ pub fn update_layer_effects(
         saturation,
         blur: blur.max(0.0),
         filter,
-        hue_shift: hue_shift.unwrap_or(layer.effects.hue_shift).clamp(-180.0, 180.0),
-        temperature: temperature.unwrap_or(layer.effects.temperature).clamp(-100.0, 100.0),
-        sharpness: sharpness.unwrap_or(layer.effects.sharpness).clamp(0.0, 100.0),
+        hue_shift: hue_shift
+            .unwrap_or(layer.effects.hue_shift)
+            .clamp(-180.0, 180.0),
+        temperature: temperature
+            .unwrap_or(layer.effects.temperature)
+            .clamp(-100.0, 100.0),
+        sharpness: sharpness
+            .unwrap_or(layer.effects.sharpness)
+            .clamp(0.0, 100.0),
         vignette: vignette.unwrap_or(layer.effects.vignette).clamp(0.0, 100.0),
         levels_black: levels_black.unwrap_or(layer.effects.levels_black).min(250),
         levels_white: levels_white.unwrap_or(layer.effects.levels_white).max(5),
-        levels_gamma: levels_gamma.unwrap_or(layer.effects.levels_gamma).clamp(0.2, 3.0),
+        levels_gamma: levels_gamma
+            .unwrap_or(layer.effects.levels_gamma)
+            .clamp(0.2, 3.0),
         lut_preset: lut_preset.unwrap_or_else(|| layer.effects.lut_preset.clone()),
     };
     render_and_respond(&mut s)
 }
-
-
 
 #[tauri::command]
 pub fn set_layer_outline(
@@ -972,8 +985,6 @@ pub fn set_layer_outline(
     render_and_respond(&mut s)
 }
 
-
-
 #[tauri::command]
 pub fn reorder_layer(
     state: tauri::State<'_, SharedProjectState>,
@@ -994,8 +1005,6 @@ pub fn reorder_layer(
     render_and_respond(&mut s)
 }
 
-
-
 #[tauri::command]
 pub fn toggle_layer_visibility(
     state: tauri::State<'_, SharedProjectState>,
@@ -1013,8 +1022,6 @@ pub fn toggle_layer_visibility(
     render_and_respond(&mut s)
 }
 
-
-
 #[tauri::command]
 pub fn toggle_layer_lock(
     state: tauri::State<'_, SharedProjectState>,
@@ -1031,8 +1038,6 @@ pub fn toggle_layer_lock(
     layer.locked = !layer.locked;
     render_and_respond(&mut s)
 }
-
-
 
 #[tauri::command]
 pub fn duplicate_layer(
@@ -1056,8 +1061,6 @@ pub fn duplicate_layer(
     render_and_respond(&mut s)
 }
 
-
-
 #[tauri::command]
 pub fn delete_layer(
     state: tauri::State<'_, SharedProjectState>,
@@ -1075,12 +1078,8 @@ pub fn delete_layer(
     render_and_respond(&mut s)
 }
 
-
-
 #[tauri::command]
-pub fn undo_action(
-    state: tauri::State<'_, SharedProjectState>,
-) -> Result<ProjectResponse, String> {
+pub fn undo_action(state: tauri::State<'_, SharedProjectState>) -> Result<ProjectResponse, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
     if let Some(prev) = s.undo_stack.pop() {
         let curr = std::mem::replace(&mut s.current, prev);
@@ -1089,12 +1088,8 @@ pub fn undo_action(
     render_and_respond(&mut s)
 }
 
-
-
 #[tauri::command]
-pub fn redo_action(
-    state: tauri::State<'_, SharedProjectState>,
-) -> Result<ProjectResponse, String> {
+pub fn redo_action(state: tauri::State<'_, SharedProjectState>) -> Result<ProjectResponse, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
     if let Some(next) = s.redo_stack.pop() {
         let curr = std::mem::replace(&mut s.current, next);
@@ -1102,8 +1097,6 @@ pub fn redo_action(
     }
     render_and_respond(&mut s)
 }
-
-
 
 // ── Export & Project Save/Load ──────────────────────────────────────────────
 
@@ -1158,12 +1151,16 @@ pub fn save_image_formatted(
             let file = std::fs::File::create(dest).map_err(|e| e.to_string())?;
             let mut enc =
                 image::codecs::jpeg::JpegEncoder::new_with_quality(file, quality.clamp(1, 100));
-            enc.encode_image(&img.to_rgb8()).map_err(|e| e.to_string())?;
+            enc.encode_image(&img.to_rgb8())
+                .map_err(|e| e.to_string())?;
         }
         "svg" => {
             let mut png_bytes: Vec<u8> = Vec::new();
-            img.write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
-                .map_err(|e| e.to_string())?;
+            img.write_to(
+                &mut std::io::Cursor::new(&mut png_bytes),
+                image::ImageFormat::Png,
+            )
+            .map_err(|e| e.to_string())?;
             use base64::Engine;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
             let svg = format!(
@@ -1185,7 +1182,8 @@ pub fn save_image_formatted(
                     &mut jpg_bytes,
                     quality.clamp(1, 100),
                 );
-                enc.encode_image(&img.to_rgb8()).map_err(|e| e.to_string())?;
+                enc.encode_image(&img.to_rgb8())
+                    .map_err(|e| e.to_string())?;
             }
             let w = img.width();
             let h = img.height();
@@ -1196,8 +1194,16 @@ pub fn save_image_formatted(
                 offsets.push(pdf.len());
                 pdf.extend_from_slice(body);
             };
-            push_obj(&mut pdf, &mut offsets, b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
-            push_obj(&mut pdf, &mut offsets, b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+            push_obj(
+                &mut pdf,
+                &mut offsets,
+                b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+            );
+            push_obj(
+                &mut pdf,
+                &mut offsets,
+                b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+            );
             let p3 = format!(
                 "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>\nendobj\n"
             );
@@ -1217,12 +1223,19 @@ pub fn save_image_formatted(
             );
             push_obj(&mut pdf, &mut offsets, p5.as_bytes());
             let xref_pos = pdf.len();
-            pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len()).as_bytes());
+            pdf.extend_from_slice(
+                format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len()).as_bytes(),
+            );
             for off in offsets.iter().skip(1) {
                 pdf.extend_from_slice(format!("{:010} 00000 n \n", off).as_bytes());
             }
             pdf.extend_from_slice(
-                format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", offsets.len(), xref_pos).as_bytes(),
+                format!(
+                    "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                    offsets.len(),
+                    xref_pos
+                )
+                .as_bytes(),
             );
             std::fs::write(dest, pdf).map_err(|e| e.to_string())?;
         }
@@ -1233,7 +1246,10 @@ pub fn save_image_formatted(
                 let resized = img.resize_exact(sz, sz, FilterType::Lanczos3);
                 let mut png_buf: Vec<u8> = Vec::new();
                 resized
-                    .write_to(&mut std::io::Cursor::new(&mut png_buf), image::ImageFormat::Png)
+                    .write_to(
+                        &mut std::io::Cursor::new(&mut png_buf),
+                        image::ImageFormat::Png,
+                    )
                     .map_err(|e| e.to_string())?;
                 frames.push((sz, png_buf));
             }
@@ -1296,11 +1312,18 @@ pub fn export_batch(
     let img = render_project_composite(&mut snapshot, "")?;
     let dir = Path::new(&dest_dir);
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let ext = if format == "jpeg" { "jpg" } else { format.as_str() };
+    let ext = if format == "jpeg" {
+        "jpg"
+    } else {
+        format.as_str()
+    };
     let mut saved = Vec::new();
     for p in presets {
         let resized = img.resize_exact(p.width.max(1), p.height.max(1), FilterType::Lanczos3);
-        let out_path = dir.join(format!("{}_{}_{}x{}.{}", base_name, p.id, p.width, p.height, ext));
+        let out_path = dir.join(format!(
+            "{}_{}_{}x{}.{}",
+            base_name, p.id, p.width, p.height, ext
+        ));
         save_image_formatted(&resized, &out_path, &format, quality)?;
         saved.push(out_path.to_string_lossy().to_string());
     }
@@ -1323,10 +1346,18 @@ pub fn trim_transparency(
     let mut max_y = 0u32;
     for (x, y, px) in rendered.enumerate_pixels() {
         if px[3] > 0 {
-            if x < min_x { min_x = x; }
-            if y < min_y { min_y = y; }
-            if x > max_x { max_x = x; }
-            if y > max_y { max_y = y; }
+            if x < min_x {
+                min_x = x;
+            }
+            if y < min_y {
+                min_y = y;
+            }
+            if x > max_x {
+                max_x = x;
+            }
+            if y > max_y {
+                max_y = y;
+            }
         }
     }
     if min_x > max_x || min_y > max_y {
@@ -1404,8 +1435,8 @@ pub fn recover_autosave(
 ) -> Result<ProjectResponse, String> {
     let dir = crate::storage::ensure_subdir("autosave")?;
     let dest = dir.join("autosave.veltrax");
-    let raw = std::fs::read_to_string(&dest)
-        .map_err(|e| format!("Failed to read autosave: {}", e))?;
+    let raw =
+        std::fs::read_to_string(&dest).map_err(|e| format!("Failed to read autosave: {}", e))?;
     let mut snapshot: ProjectSnapshot =
         serde_json::from_str(&raw).map_err(|e| format!("Invalid autosave: {}", e))?;
     let _ = crate::storage::migrate_snapshot_if_needed(&mut snapshot, None)?;
@@ -1440,28 +1471,9 @@ pub fn clear_autosave() -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-pub fn save_project_file(
-    state: tauri::State<'_, SharedProjectState>,
-    dest_path: String,
-) -> Result<ProjectResponse, String> {
-    let mut s = state.lock().map_err(|e| e.to_string())?;
-    if s.current.project_id.trim().is_empty() {
-        s.current.project_id = format!("proj_{}", crate::storage::now_unix_millis());
-    }
-    s.current.schema_version = crate::storage::CURRENT_SCHEMA_VERSION;
-    let json = serde_json::to_string_pretty(&s.current).map_err(|e| e.to_string())?;
-    crate::storage::atomic_write_str(Path::new(&dest_path), &json)
-        .map_err(|e| format!("Failed to save project: {}", e))?;
-    s.project_file_path = Some(dest_path.clone());
-    s.dirty = false;
-    let _ = crate::storage::record_recent_project(&dest_path, &s.current, None);
-    Ok(s.to_response())
-}
-
-#[tauri::command]
-pub fn save_current_project(
-    state: tauri::State<'_, SharedProjectState>,
+pub fn save_project_file_from_state(
+    state: &SharedProjectState,
+    dest_path: &str,
 ) -> Result<ProjectResponse, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
     if !s.has_project {
@@ -1471,17 +1483,105 @@ pub fn save_current_project(
         s.current.project_id = format!("proj_{}", crate::storage::now_unix_millis());
     }
     s.current.schema_version = crate::storage::CURRENT_SCHEMA_VERSION;
-    let dest_path = match &s.project_file_path {
-        Some(p) if !p.is_empty() => p.clone(),
-        _ => auto_project_file_path(&s.current.project_name, &s.current.project_id)?,
-    };
     let json = serde_json::to_string_pretty(&s.current).map_err(|e| e.to_string())?;
-    crate::storage::atomic_write_str(Path::new(&dest_path), &json)
+    crate::storage::atomic_write_str(Path::new(dest_path), &json)
         .map_err(|e| format!("Failed to save project: {}", e))?;
-    s.project_file_path = Some(dest_path.clone());
+    s.project_file_path = Some(dest_path.to_string());
     s.dirty = false;
-    let _ = crate::storage::record_recent_project(&dest_path, &s.current, None);
+    let _ = crate::storage::record_recent_project(dest_path, &s.current, None);
     Ok(s.to_response())
+}
+
+#[tauri::command]
+pub fn save_project_file(
+    state: tauri::State<'_, SharedProjectState>,
+    dest_path: String,
+) -> Result<ProjectResponse, String> {
+    save_project_file_from_state(state.inner(), &dest_path)
+}
+
+pub fn save_current_project_from_state(
+    state: &SharedProjectState,
+) -> Result<ProjectResponse, String> {
+    let dest_path = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        if !s.has_project {
+            return Err("No active project.".to_string());
+        }
+        match &s.project_file_path {
+            Some(p) if !p.is_empty() => p.clone(),
+            _ => auto_project_file_path(&s.current.project_name, &s.current.project_id)?,
+        }
+    };
+    save_project_file_from_state(state, &dest_path)
+}
+
+#[tauri::command]
+pub fn save_current_project(
+    state: tauri::State<'_, SharedProjectState>,
+) -> Result<ProjectResponse, String> {
+    save_current_project_from_state(state.inner())
+}
+
+pub fn export_image_from_state(
+    state: &SharedProjectState,
+    dest_path: &str,
+    format: &str,
+    quality: u8,
+) -> Result<String, String> {
+    if !(1..=100).contains(&quality) {
+        return Err("'quality' must be an integer from 1 to 100.".into());
+    }
+    if !matches!(
+        format,
+        "png" | "jpeg" | "jpg" | "webp" | "svg" | "pdf" | "ico"
+    ) {
+        return Err(format!("Unsupported image format '{}'.", format));
+    }
+    let mut snapshot = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        if !s.has_project {
+            return Err("No active project to export.".to_string());
+        }
+        s.current.clone()
+    };
+    let img = render_project_composite(&mut snapshot, "")?;
+    let dest = Path::new(dest_path);
+    if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Could not create output directory: {}", e))?;
+    }
+    if dest.exists() {
+        return Err(format!(
+            "Refusing to overwrite existing file '{}'.",
+            dest_path
+        ));
+    }
+    let nonce = crate::storage::now_unix_millis();
+    let extension = match format {
+        "jpeg" => "jpg",
+        other => other,
+    };
+    let temp = dest.with_file_name(format!(
+        ".veltrax-export-{}-{}.{}",
+        std::process::id(),
+        nonce,
+        extension
+    ));
+    let result = save_image_formatted(&img, &temp, format, quality).and_then(|()| {
+        std::fs::hard_link(&temp, dest).map_err(|e| {
+            format!(
+                "Could not finalize export without overwriting an existing file: {}",
+                e
+            )
+        })?;
+        std::fs::remove_file(&temp)
+            .map_err(|e| format!("Export succeeded but temporary cleanup failed: {}", e))
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result.map(|()| dest_path.to_string())
 }
 
 #[tauri::command]
@@ -1544,8 +1644,6 @@ pub fn check_missing_assets(
     Ok(missing)
 }
 
-
-
 // ── Flip, Magic Resize & Persistent User Library (%APPDATA%) ────────────────
 
 #[tauri::command]
@@ -1572,8 +1670,6 @@ pub fn flip_layer(
     }
     render_and_respond(&mut s)
 }
-
-
 
 #[tauri::command]
 pub fn resize_canvas(
@@ -1609,11 +1705,9 @@ pub fn resize_canvas(
     render_and_respond(&mut s)
 }
 
-
-
 fn user_data_root() -> std::path::PathBuf {
-    let appdata = std::env::var("APPDATA")
-        .unwrap_or_else(|_| r"C:\Users\Public\AppData\Roaming".to_string());
+    let appdata =
+        std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\Public\AppData\Roaming".to_string());
     std::path::Path::new(&appdata).join("Veltrax Studios")
 }
 
@@ -1795,8 +1889,6 @@ pub fn transform_layers(
     render_and_respond(&mut s)
 }
 
-
-
 #[tauri::command]
 pub fn duplicate_layers(
     state: tauri::State<'_, SharedProjectState>,
@@ -1826,8 +1918,6 @@ pub fn duplicate_layers(
     render_and_respond(&mut s)
 }
 
-
-
 #[tauri::command]
 pub fn delete_layers(
     state: tauri::State<'_, SharedProjectState>,
@@ -1842,15 +1932,13 @@ pub fn delete_layers(
     render_and_respond(&mut s)
 }
 
-
-
 #[tauri::command]
 pub fn paste_layers_from_json(
     state: tauri::State<'_, SharedProjectState>,
     layers_json: String,
 ) -> Result<ProjectResponse, String> {
-    let parsed: Vec<Layer> =
-        serde_json::from_str(&layers_json).map_err(|e| format!("Invalid clipboard layers: {}", e))?;
+    let parsed: Vec<Layer> = serde_json::from_str(&layers_json)
+        .map_err(|e| format!("Invalid clipboard layers: {}", e))?;
     if parsed.is_empty() {
         return Err("Clipboard has no layers.".to_string());
     }
@@ -1865,8 +1953,6 @@ pub fn paste_layers_from_json(
     }
     render_and_respond(&mut s)
 }
-
-
 
 #[tauri::command]
 pub fn add_image_bytes_layer(
@@ -1942,8 +2028,6 @@ pub fn add_image_bytes_layer(
     render_and_respond(&mut s)
 }
 
-
-
 #[tauri::command]
 pub fn group_layers(
     state: tauri::State<'_, SharedProjectState>,
@@ -1975,8 +2059,6 @@ pub fn group_layers(
     render_and_respond(&mut s)
 }
 
-
-
 #[tauri::command]
 pub fn ungroup_layers(
     state: tauri::State<'_, SharedProjectState>,
@@ -2004,8 +2086,6 @@ pub fn ungroup_layers(
     render_and_respond(&mut s)
 }
 
-
-
 #[tauri::command]
 pub fn toggle_group_visibility(
     state: tauri::State<'_, SharedProjectState>,
@@ -2022,8 +2102,6 @@ pub fn toggle_group_visibility(
     grp.visible = !grp.visible;
     render_and_respond(&mut s)
 }
-
-
 
 #[tauri::command]
 pub fn toggle_group_lock(
@@ -2047,8 +2125,6 @@ pub fn toggle_group_lock(
     }
     render_and_respond(&mut s)
 }
-
-
 
 #[tauri::command]
 pub fn align_layers(
@@ -2114,17 +2190,20 @@ pub fn align_layers(
 #[tauri::command]
 pub fn import_font(source_path: String) -> Result<String, String> {
     let p = std::path::Path::new(&source_path);
-    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     if ext != "ttf" && ext != "otf" {
         return Err("Only .ttf and .otf font files are supported.".into());
     }
-    let filename = p.file_name().and_then(|n| n.to_str())
+    let filename = p
+        .file_name()
+        .and_then(|n| n.to_str())
         .ok_or("Invalid file name")?
         .to_string();
-    let fonts_dir = {
-        let appdata = std::env::var("APPDATA").map_err(|e| e.to_string())?;
-        std::path::PathBuf::from(appdata).join("Veltrax Studios").join("fonts")
-    };
+    let fonts_dir = crate::storage::user_data_root().join("fonts");
     std::fs::create_dir_all(&fonts_dir).map_err(|e| e.to_string())?;
     let dest = fonts_dir.join(&filename);
     std::fs::copy(&source_path, &dest).map_err(|e| format!("Copy failed: {}", e))?;
@@ -2133,10 +2212,7 @@ pub fn import_font(source_path: String) -> Result<String, String> {
 
 #[tauri::command]
 pub fn list_imported_fonts() -> Result<Vec<String>, String> {
-    let fonts_dir = {
-        let appdata = std::env::var("APPDATA").map_err(|e| e.to_string())?;
-        std::path::PathBuf::from(appdata).join("Veltrax Studios").join("fonts")
-    };
+    let fonts_dir = crate::storage::user_data_root().join("fonts");
     if !fonts_dir.exists() {
         return Ok(vec![]);
     }
@@ -2145,7 +2221,10 @@ pub fn list_imported_fonts() -> Result<Vec<String>, String> {
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name().to_string_lossy().to_string();
         let ext = std::path::Path::new(&name)
-            .extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
         if ext == "ttf" || ext == "otf" {
             names.push(name);
         }
@@ -2156,10 +2235,7 @@ pub fn list_imported_fonts() -> Result<Vec<String>, String> {
 
 #[tauri::command]
 pub fn delete_imported_font(filename: String) -> Result<(), String> {
-    let fonts_dir = {
-        let appdata = std::env::var("APPDATA").map_err(|e| e.to_string())?;
-        std::path::PathBuf::from(appdata).join("Veltrax Studios").join("fonts")
-    };
+    let fonts_dir = crate::storage::user_data_root().join("fonts");
     let path = fonts_dir.join(&filename);
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| e.to_string())?;
@@ -2194,16 +2270,31 @@ pub fn update_layer_shadow(
     record_undo: Option<bool>,
 ) -> Result<ProjectResponse, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
-    if record_undo.unwrap_or(true) { s.push_undo(); }
-    let layer = s.current.layers.iter_mut()
+    if record_undo.unwrap_or(true) {
+        s.push_undo();
+    }
+    let layer = s
+        .current
+        .layers
+        .iter_mut()
         .find(|l| l.id == layer_id)
         .ok_or_else(|| format!("Layer '{}' not found.", layer_id))?;
     layer.shadow.enabled = enabled;
-    if let Some(c) = color_hex { layer.shadow.color = hex_to_rgba8(&c); }
-    if let Some(v) = blur { layer.shadow.blur = v as f32; }
-    if let Some(v) = distance { layer.shadow.distance = v as f32; }
-    if let Some(v) = angle { layer.shadow.angle = v; }
-    if let Some(v) = opacity { layer.shadow.opacity = (v.min(100) as f32) / 100.0; }
+    if let Some(c) = color_hex {
+        layer.shadow.color = hex_to_rgba8(&c);
+    }
+    if let Some(v) = blur {
+        layer.shadow.blur = v as f32;
+    }
+    if let Some(v) = distance {
+        layer.shadow.distance = v as f32;
+    }
+    if let Some(v) = angle {
+        layer.shadow.angle = v;
+    }
+    if let Some(v) = opacity {
+        layer.shadow.opacity = (v.min(100) as f32) / 100.0;
+    }
     render_and_respond(&mut s)
 }
 
@@ -2218,14 +2309,27 @@ pub fn update_layer_glow(
     record_undo: Option<bool>,
 ) -> Result<ProjectResponse, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
-    if record_undo.unwrap_or(true) { s.push_undo(); }
-    let layer = s.current.layers.iter_mut()
+    if record_undo.unwrap_or(true) {
+        s.push_undo();
+    }
+    let layer = s
+        .current
+        .layers
+        .iter_mut()
         .find(|l| l.id == layer_id)
         .ok_or_else(|| format!("Layer '{}' not found.", layer_id))?;
-    let glow = if kind == "inner" { &mut layer.inner_glow } else { &mut layer.outer_glow };
+    let glow = if kind == "inner" {
+        &mut layer.inner_glow
+    } else {
+        &mut layer.outer_glow
+    };
     glow.enabled = enabled;
-    if let Some(c) = color_hex { glow.color = hex_to_rgba8(&c); }
-    if let Some(v) = intensity { glow.intensity = v.clamp(1, 60) as f32; }
+    if let Some(c) = color_hex {
+        glow.color = hex_to_rgba8(&c);
+    }
+    if let Some(v) = intensity {
+        glow.intensity = v.clamp(1, 60) as f32;
+    }
     render_and_respond(&mut s)
 }
 
@@ -2238,12 +2342,19 @@ pub fn update_layer_mask(
     record_undo: Option<bool>,
 ) -> Result<ProjectResponse, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
-    if record_undo.unwrap_or(true) { s.push_undo(); }
-    let layer = s.current.layers.iter_mut()
+    if record_undo.unwrap_or(true) {
+        s.push_undo();
+    }
+    let layer = s
+        .current
+        .layers
+        .iter_mut()
         .find(|l| l.id == layer_id)
         .ok_or_else(|| format!("Layer '{}' not found.", layer_id))?;
     layer.mask_shape = mask_shape;
-    if let Some(r) = mask_radius { layer.mask_radius = r; }
+    if let Some(r) = mask_radius {
+        layer.mask_radius = r;
+    }
     render_and_respond(&mut s)
 }
 
@@ -2255,8 +2366,13 @@ pub fn set_clip_to_below(
     record_undo: Option<bool>,
 ) -> Result<ProjectResponse, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
-    if record_undo.unwrap_or(true) { s.push_undo(); }
-    let layer = s.current.layers.iter_mut()
+    if record_undo.unwrap_or(true) {
+        s.push_undo();
+    }
+    let layer = s
+        .current
+        .layers
+        .iter_mut()
         .find(|l| l.id == layer_id)
         .ok_or_else(|| format!("Layer '{}' not found.", layer_id))?;
     layer.clip_to_below = enabled;
@@ -2277,8 +2393,13 @@ pub fn update_text_advanced(
     record_undo: Option<bool>,
 ) -> Result<ProjectResponse, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
-    if record_undo.unwrap_or(true) { s.push_undo(); }
-    let layer = s.current.layers.iter_mut()
+    if record_undo.unwrap_or(true) {
+        s.push_undo();
+    }
+    let layer = s
+        .current
+        .layers
+        .iter_mut()
         .find(|l| l.id == layer_id)
         .ok_or_else(|| format!("Layer '{}' not found.", layer_id))?;
     match &mut layer.kind {
@@ -2289,17 +2410,32 @@ pub fn update_text_advanced(
             curve_amount: ca,
             ..
         } => {
-            if let Some(v) = underline { *ul = v; }
-            if let Some(v) = curve_amount { *ca = v.clamp(-180.0, 180.0); }
-            if let Some(v) = gradient_angle { *ga = v; }
+            if let Some(v) = underline {
+                *ul = v;
+            }
+            if let Some(v) = curve_amount {
+                *ca = v.clamp(-180.0, 180.0);
+            }
+            if let Some(v) = gradient_angle {
+                *ga = v;
+            }
             // If either gradient color given, build/update gradient_colors pair
             if gradient_from_hex.is_some() || gradient_to_hex.is_some() {
-                let cur = gc.unwrap_or([[255,255,255,255],[255,255,0,255]]);
-                let from = gradient_from_hex.as_deref().map(hex_to_rgba8).unwrap_or(cur[0]);
-                let to   = gradient_to_hex.as_deref().map(hex_to_rgba8).unwrap_or(cur[1]);
+                let cur = gc.unwrap_or([[255, 255, 255, 255], [255, 255, 0, 255]]);
+                let from = gradient_from_hex
+                    .as_deref()
+                    .map(hex_to_rgba8)
+                    .unwrap_or(cur[0]);
+                let to = gradient_to_hex
+                    .as_deref()
+                    .map(hex_to_rgba8)
+                    .unwrap_or(cur[1]);
                 *gc = Some([from, to]);
-            } else if gradient_from_hex.is_none() && gradient_to_hex.is_none()
-                && underline.is_none() && curve_amount.is_none() && gradient_angle.is_none()
+            } else if gradient_from_hex.is_none()
+                && gradient_to_hex.is_none()
+                && underline.is_none()
+                && curve_amount.is_none()
+                && gradient_angle.is_none()
             {
                 // Clear gradient
                 *gc = None;
@@ -2337,7 +2473,10 @@ pub fn add_shape_advanced(
     let lx = x.unwrap_or((cw - width as i64) / 2);
     let ly = y.unwrap_or((ch - height as i64) / 2);
     let fill_color = parse_hex_color(&fill_hex);
-    let b_color = border_hex.as_deref().map(parse_hex_color).unwrap_or([255,255,255,255]);
+    let b_color = border_hex
+        .as_deref()
+        .map(parse_hex_color)
+        .unwrap_or([255, 255, 255, 255]);
     let fill_gradient = match (fill_gradient_from.as_deref(), fill_gradient_to.as_deref()) {
         (Some(a), Some(b)) => Some(BgGradient {
             from_color: hex_to_rgba8(a),
@@ -2348,15 +2487,16 @@ pub fn add_shape_advanced(
     };
     let id = format!("layer_{}", uuid_v4());
     let name = match shape_type.as_str() {
-        "line"     => "Line",
-        "arrow"    => "Arrow",
+        "line" => "Line",
+        "arrow" => "Arrow",
         "triangle" => "Triangle",
-        "star"     => "Star",
-        "polygon"  => "Polygon",
-        "circle"   => "Circle",
-        "badge"    => "Badge",
-        _          => "Rectangle",
-    }.to_string();
+        "star" => "Star",
+        "polygon" => "Polygon",
+        "circle" => "Circle",
+        "badge" => "Badge",
+        _ => "Rectangle",
+    }
+    .to_string();
     let layer = Layer {
         id: id.clone(),
         name,
@@ -2401,7 +2541,10 @@ pub fn add_shape_advanced(
 
 fn uuid_v4() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_micros();
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
     format!("{:x}", ms ^ (ms >> 16))
 }
 
@@ -2418,9 +2561,18 @@ pub fn render_drag_layers(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let below = dir.join(format!("veltrax-drag-{}-below.png", ms)).to_string_lossy().to_string();
-    let layer = dir.join(format!("veltrax-drag-{}-layer.png", ms)).to_string_lossy().to_string();
-    let above = dir.join(format!("veltrax-drag-{}-above.png", ms)).to_string_lossy().to_string();
+    let below = dir
+        .join(format!("veltrax-drag-{}-below.png", ms))
+        .to_string_lossy()
+        .to_string();
+    let layer = dir
+        .join(format!("veltrax-drag-{}-layer.png", ms))
+        .to_string_lossy()
+        .to_string();
+    let above = dir
+        .join(format!("veltrax-drag-{}-above.png", ms))
+        .to_string_lossy()
+        .to_string();
     render_drag_split(&mut s.current, &layer_id, &below, &layer, &above)
 }
 
@@ -2428,7 +2580,9 @@ pub fn render_drag_layers(
 
 fn appdata_subdir(sub: &str) -> Result<std::path::PathBuf, String> {
     let appdata = std::env::var("APPDATA").map_err(|e| e.to_string())?;
-    let dir = std::path::PathBuf::from(appdata).join("Veltrax Studios").join(sub);
+    let dir = std::path::PathBuf::from(appdata)
+        .join("Veltrax Studios")
+        .join(sub);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }
@@ -2659,23 +2813,55 @@ pub fn brush_mask_stroke(
     render_and_respond(&mut s)
 }
 
+fn is_u2netp_model_valid(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| (1_000_000..=20 * 1024 * 1024).contains(&metadata.len()))
+        .unwrap_or(false)
+        && tract_onnx::onnx().model_for_path(path).is_ok()
+}
+
 fn ensure_u2netp_model() -> Result<std::path::PathBuf, String> {
     let dir = appdata_subdir("models")?;
     let model_path = dir.join("u2netp.onnx");
-    if model_path.is_file() && std::fs::metadata(&model_path).map(|m| m.len() > 1_000_000).unwrap_or(false) {
+    if is_u2netp_model_valid(&model_path) {
         return Ok(model_path);
     }
     let url = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx";
-    let resp = ureq::get(url)
-        .call()
-        .map_err(|e| format!("Failed to download U2-Net model (check internet): {}", e))?;
+    crate::support::append_app_log(
+        "INFO",
+        "U2-Net download requested by the user through AI Remove BG.",
+    );
+    let resp = match ureq::get(url).call() {
+        Ok(response) => response,
+        Err(error) => {
+            crate::support::append_app_log("ERROR", "U2-Net model download failed.");
+            return Err(format!(
+                "Failed to download U2-Net model (check internet): {}",
+                error
+            ));
+        }
+    };
     let mut bytes = Vec::new();
     use std::io::Read;
     resp.into_reader()
-        .take(20 * 1024 * 1024)
+        .take(20 * 1024 * 1024 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| format!("Failed reading U2-Net model download: {}", e))?;
-    std::fs::write(&model_path, &bytes).map_err(|e| format!("Failed saving model: {}", e))?;
+    if !(1_000_000..=20 * 1024 * 1024).contains(&bytes.len()) {
+        crate::support::append_app_log("ERROR", "U2-Net model download had an invalid size.");
+        return Err("Downloaded U2-Net model is incomplete or has an unexpected size.".to_string());
+    }
+    let candidate_path = dir.join(format!(".u2netp-validation-{}.onnx", std::process::id()));
+    crate::storage::atomic_write_bytes(&candidate_path, &bytes)
+        .map_err(|e| format!("Failed staging model for validation: {}", e))?;
+    let candidate_is_valid = is_u2netp_model_valid(&candidate_path);
+    let _ = std::fs::remove_file(&candidate_path);
+    if !candidate_is_valid {
+        crate::support::append_app_log("ERROR", "Downloaded U2-Net model failed ONNX validation.");
+        return Err("Downloaded U2-Net model is not a valid ONNX model.".to_string());
+    }
+    crate::storage::atomic_write_bytes(&model_path, &bytes)
+        .map_err(|e| format!("Failed saving model atomically: {}", e))?;
     Ok(model_path)
 }
 
@@ -2706,7 +2892,10 @@ pub fn ai_remove_background(
     let model = tract_onnx::onnx()
         .model_for_path(&model_path)
         .map_err(|e| format!("ONNX load error: {}", e))?
-        .with_input_fact(0, InferenceFact::dt_shape(f32::datum_type(), tvec!(1, 3, 320, 320)))
+        .with_input_fact(
+            0,
+            InferenceFact::dt_shape(f32::datum_type(), tvec!(1, 3, 320, 320)),
+        )
         .map_err(|e| format!("ONNX input fact error: {}", e))?
         .into_optimized()
         .map_err(|e| format!("ONNX optimize error: {}", e))?
@@ -2731,8 +2920,12 @@ pub fn ai_remove_background(
     let mut min_v = f32::MAX;
     let mut max_v = f32::MIN;
     for &v in out_arr.iter() {
-        if v < min_v { min_v = v; }
-        if v > max_v { max_v = v; }
+        if v < min_v {
+            min_v = v;
+        }
+        if v > max_v {
+            max_v = v;
+        }
     }
     let span = (max_v - min_v).max(1e-6);
     let mut mask_320 = image::GrayImage::new(320, 320);
@@ -2887,7 +3080,13 @@ pub fn save_as_template(
     // Sanitize filename
     let safe_name: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let dir = templates_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -2937,7 +3136,13 @@ pub fn delete_template(name: String) -> Result<(), String> {
     let dir = templates_dir();
     let safe_name: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let file_path = dir.join(format!("{}.veltrax", safe_name.trim()));
     if file_path.is_file() {
@@ -2994,7 +3199,10 @@ pub fn add_smart_text_layer(
 
     let mut s = state.lock().map_err(|e| e.to_string())?;
     s.push_undo();
-    let (cx, cy) = (s.current.canvas_width as i64 / 2, s.current.canvas_height as i64 / 2);
+    let (cx, cy) = (
+        s.current.canvas_width as i64 / 2,
+        s.current.canvas_height as i64 / 2,
+    );
 
     let layer = Layer {
         id,
@@ -3048,18 +3256,18 @@ pub fn add_smart_text_layer(
 
 /// Brand kit canonical sizes (name ? width � height)
 const BRAND_SIZES: &[(&str, u32, u32)] = &[
-    ("instagram_post",        1080, 1080),
-    ("instagram_story",       1080, 1920),
-    ("twitter_post",          1200,  675),
-    ("twitter_header",        1500,  500),
-    ("facebook_post",         1200,  630),
-    ("linkedin_post",         1200,  628),
-    ("youtube_thumbnail",     1280,  720),
-    ("youtube_banner",        2560, 1440),
-    ("tiktok_video",          1080, 1920),
-    ("pinterest_pin",          600,  900),
-    ("og_image",              1200,  630),
-    ("email_header",          600,  200),
+    ("instagram_post", 1080, 1080),
+    ("instagram_story", 1080, 1920),
+    ("twitter_post", 1200, 675),
+    ("twitter_header", 1500, 500),
+    ("facebook_post", 1200, 630),
+    ("linkedin_post", 1200, 628),
+    ("youtube_thumbnail", 1280, 720),
+    ("youtube_banner", 2560, 1440),
+    ("tiktok_video", 1080, 1920),
+    ("pinterest_pin", 600, 900),
+    ("og_image", 1200, 630),
+    ("email_header", 600, 200),
 ];
 
 #[tauri::command]
@@ -3139,7 +3347,8 @@ pub fn get_layer_thumbnails(
             let scale = (64.0 / w.max(h) as f32).min(1.0);
             let nw = ((w as f32 * scale) as u32).max(1);
             let nh = ((h as f32 * scale) as u32).max(1);
-            let thumb = image::DynamicImage::ImageRgba8(img).resize_exact(nw, nh, FilterType::Triangle);
+            let thumb =
+                image::DynamicImage::ImageRgba8(img).resize_exact(nw, nh, FilterType::Triangle);
             let mut buf = Vec::new();
             if thumb
                 .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)

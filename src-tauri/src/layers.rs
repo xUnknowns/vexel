@@ -404,7 +404,9 @@ pub fn parse_hex_color(hex: &str) -> [u8; 4] {
 fn load_font_bytes(style: &str) -> Result<Vec<u8>, String> {
     // 1. Check imported custom fonts in %APPDATA%\Veltrax Studios\fonts\
     if let Ok(appdata) = std::env::var("APPDATA") {
-        let custom_dir = std::path::Path::new(&appdata).join("Veltrax Studios").join("fonts");
+        let custom_dir = std::path::Path::new(&appdata)
+            .join("Veltrax Studios")
+            .join("fonts");
         let custom_path = custom_dir.join(style);
         if custom_path.is_file() {
             if let Ok(data) = std::fs::read(&custom_path) {
@@ -510,7 +512,10 @@ pub fn render_project_composite(
         layer.bounds_width = layer_img.width();
         layer.bounds_height = layer_img.height();
 
-        if !layer.visible || !is_group_visible(layer.group_id.as_deref(), &groups_ref) || layer.opacity <= 0.001 {
+        if !layer.visible
+            || !is_group_visible(layer.group_id.as_deref(), &groups_ref)
+            || layer.opacity <= 0.001
+        {
             continue;
         }
 
@@ -544,7 +549,11 @@ pub fn render_project_composite(
         }
 
         if layer.inner_glow.enabled && layer.inner_glow.intensity > 0.5 {
-            layer_img = apply_inner_glow(&layer_img, layer.inner_glow.color, layer.inner_glow.intensity);
+            layer_img = apply_inner_glow(
+                &layer_img,
+                layer.inner_glow.color,
+                layer.inner_glow.intensity,
+            );
         }
 
         let mut draw_x = layer.x;
@@ -559,7 +568,11 @@ pub fn render_project_composite(
 
         if layer.outer_glow.enabled && layer.outer_glow.intensity > 0.5 {
             let pad = (layer.outer_glow.intensity.ceil() as i64).min(40);
-            layer_img = apply_outer_glow(&layer_img, layer.outer_glow.color, layer.outer_glow.intensity);
+            layer_img = apply_outer_glow(
+                &layer_img,
+                layer.outer_glow.color,
+                layer.outer_glow.intensity,
+            );
             draw_x -= pad;
             draw_y -= pad;
         }
@@ -652,8 +665,12 @@ pub fn render_layer_kind(kind: &LayerKind) -> Result<RgbaImage, String> {
                     }
                     let d1 = ((y as f32 / ph as f32) * pw as f32) as u32;
                     let d2 = pw.saturating_sub(1 + d1);
-                    if d1 < pw { ph_img.put_pixel(d1, y, Rgba([239, 68, 68, 200])); }
-                    if d2 < pw { ph_img.put_pixel(d2, y, Rgba([239, 68, 68, 200])); }
+                    if d1 < pw {
+                        ph_img.put_pixel(d1, y, Rgba([239, 68, 68, 200]));
+                    }
+                    if d2 < pw {
+                        ph_img.put_pixel(d2, y, Rgba([239, 68, 68, 200]));
+                    }
                 }
                 return Ok(ph_img);
             };
@@ -817,7 +834,11 @@ fn render_text_3d(
 
     let line_widths: Vec<f32> = lines.iter().map(|l| measure_line(l)).collect();
     let max_line_w = line_widths.iter().copied().fold(0.0_f32, f32::max);
-    let italic_pad = if italic { (size * 0.25).ceil() as i32 } else { 0 };
+    let italic_pad = if italic {
+        (size * 0.25).ceil() as i32
+    } else {
+        0
+    };
     let curve_pad = if curve_amount.abs() > 0.5 {
         (curve_amount.abs() * 1.4).ceil() as i32
     } else {
@@ -937,7 +958,11 @@ fn draw_text_pass(
     let (w, h) = (img.width() as i32, img.height() as i32);
     let mut pen_x = start_x;
     let mut prev = None;
-    let bold_offset = if bold { (scale.x * 0.035).max(1.0).round() as i32 } else { 0 };
+    let bold_offset = if bold {
+        (scale.x * 0.035).max(1.0).round() as i32
+    } else {
+        0
+    };
     let line_center = start_x + line_width / 2.0;
 
     for ch in text.chars() {
@@ -948,7 +973,8 @@ fn draw_text_pass(
         prev = Some(gid);
 
         let arc_dy = if curve_amount.abs() > 0.5 && line_width > 1.0 {
-            let norm = ((pen_x + scaled.h_advance(gid) / 2.0 - line_center) / (line_width / 2.0)).clamp(-1.0, 1.0);
+            let norm = ((pen_x + scaled.h_advance(gid) / 2.0 - line_center) / (line_width / 2.0))
+                .clamp(-1.0, 1.0);
             curve_amount * (norm * norm - 0.5)
         } else {
             0.0
@@ -959,7 +985,11 @@ fn draw_text_pass(
             let bb = og.px_bounds();
             og.draw(|rx, ry, v| {
                 let py = bb.min.y as i32 + ry as i32;
-                let shear = if italic { ((start_y + arc_dy - py as f32) * 0.22).round() as i32 } else { 0 };
+                let shear = if italic {
+                    ((start_y + arc_dy - py as f32) * 0.22).round() as i32
+                } else {
+                    0
+                };
                 let px = bb.min.x as i32 + rx as i32 + shear;
                 let src_a = (v * (color[3] as f32 / 255.0)).clamp(0.0, 1.0);
                 let rgba = [color[0], color[1], color[2], (src_a * 255.0) as u8];
@@ -1056,8 +1086,13 @@ fn shape_hit(
             let pts = sides.max(4).min(12) as usize * 2;
             let mut verts = Vec::with_capacity(pts);
             for i in 0..pts {
-                let ang = (i as f32) * std::f32::consts::PI / (pts as f32 / 2.0) - std::f32::consts::FRAC_PI_2;
-                let (rx, ry) = if i % 2 == 0 { (rx_out, ry_out) } else { (rx_in, ry_in) };
+                let ang = (i as f32) * std::f32::consts::PI / (pts as f32 / 2.0)
+                    - std::f32::consts::FRAC_PI_2;
+                let (rx, ry) = if i % 2 == 0 {
+                    (rx_out, ry_out)
+                } else {
+                    (rx_in, ry_in)
+                };
                 verts.push((cx + rx * ang.cos(), cy + ry * ang.sin()));
             }
             point_in_polygon(px, py, &verts)
@@ -1070,7 +1105,8 @@ fn shape_hit(
             let n = sides.max(3).min(16) as usize;
             let mut verts = Vec::with_capacity(n);
             for i in 0..n {
-                let ang = (i as f32) * 2.0 * std::f32::consts::PI / (n as f32) - std::f32::consts::FRAC_PI_2;
+                let ang = (i as f32) * 2.0 * std::f32::consts::PI / (n as f32)
+                    - std::f32::consts::FRAC_PI_2;
                 verts.push((cx + rx * ang.cos(), cy + ry * ang.sin()));
             }
             point_in_polygon(px, py, &verts)
@@ -1116,7 +1152,8 @@ fn render_shape(
     fill_gradient: Option<&BgGradient>,
 ) -> RgbaImage {
     let mut img = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 0]));
-    let grad_img = fill_gradient.map(|g| render_gradient_image(width, height, g.from_color, g.to_color, g.angle));
+    let grad_img = fill_gradient
+        .map(|g| render_gradient_image(width, height, g.from_color, g.to_color, g.angle));
     let (wf, hf) = (width as f32, height as f32);
 
     let mut mask = vec![false; (width * height) as usize];
@@ -1148,7 +1185,12 @@ fn render_shape(
                         if ox * ox + oy * oy <= bw * bw {
                             let nx = x + ox;
                             let ny = y + oy;
-                            if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 || !mask[(ny as u32 * width + nx as u32) as usize] {
+                            if nx < 0
+                                || ny < 0
+                                || nx >= width as i32
+                                || ny >= height as i32
+                                || !mask[(ny as u32 * width + nx as u32) as usize]
+                            {
                                 on_border = true;
                                 break 'edge;
                             }
@@ -1236,19 +1278,37 @@ fn render_watermark_layer(
     let th = text_img.height();
     let margin = 20i64;
     let (px, py): (i64, i64) = match position {
-        "top-left"     => (margin, margin),
-        "top-right"    => ((canvas_width as i64 - tw as i64 - margin).max(0), margin),
-        "bottom-left"  => (margin, (canvas_height as i64 - th as i64 - margin).max(0)),
-        "center"       => ((canvas_width as i64 - tw as i64) / 2, (canvas_height as i64 - th as i64) / 2),
-        _              => ((canvas_width as i64 - tw as i64 - margin).max(0), (canvas_height as i64 - th as i64 - margin).max(0)), // bottom-right
+        "top-left" => (margin, margin),
+        "top-right" => ((canvas_width as i64 - tw as i64 - margin).max(0), margin),
+        "bottom-left" => (margin, (canvas_height as i64 - th as i64 - margin).max(0)),
+        "center" => (
+            (canvas_width as i64 - tw as i64) / 2,
+            (canvas_height as i64 - th as i64) / 2,
+        ),
+        _ => (
+            (canvas_width as i64 - tw as i64 - margin).max(0),
+            (canvas_height as i64 - th as i64 - margin).max(0),
+        ), // bottom-right
     };
     composite_layer(&mut canvas, &text_img, px, py, 1.0, "normal");
     Ok(canvas)
 }
 
 fn rounded_rect_hit(x: f32, y: f32, w: f32, h: f32, r: f32) -> bool {
-    let cx = if x < r { r } else if x > w - r { w - r } else { x };
-    let cy = if y < r { r } else if y > h - r { h - r } else { y };
+    let cx = if x < r {
+        r
+    } else if x > w - r {
+        w - r
+    } else {
+        x
+    };
+    let cy = if y < r {
+        r
+    } else if y > h - r {
+        h - r
+    } else {
+        y
+    };
     let dx = x - cx;
     let dy = y - cy;
     dx * dx + dy * dy <= r * r
@@ -1314,7 +1374,8 @@ fn apply_layer_effects(rgba: RgbaImage, fx: &LayerEffects) -> RgbaImage {
     let mut out = dyn_img.to_rgba8();
 
     // Levels / Gamma LUT
-    let has_levels = fx.levels_black > 0 || fx.levels_white < 255 || (fx.levels_gamma - 1.0).abs() > 0.02;
+    let has_levels =
+        fx.levels_black > 0 || fx.levels_white < 255 || (fx.levels_gamma - 1.0).abs() > 0.02;
     let levels_lut: Option<[u8; 256]> = if has_levels {
         let b = fx.levels_black.min(250) as f32;
         let w = fx.levels_white.max(fx.levels_black.saturating_add(5)) as f32;
@@ -1429,7 +1490,11 @@ fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
         return (0.0, 0.0, l);
     }
     let d = max - min;
-    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let s = if l > 0.5 {
+        d / (2.0 - max - min)
+    } else {
+        d / (max + min)
+    };
     let h = if (max - r).abs() < 1e-6 {
         ((g - b) / d + if g < b { 6.0 } else { 0.0 }) / 6.0
     } else if (max - g).abs() < 1e-6 {
@@ -1444,14 +1509,28 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
     if s <= 1e-6 {
         return (l, l, l);
     }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
     let p = 2.0 * l - q;
     let hue2rgb = |mut t: f32| -> f32 {
-        if t < 0.0 { t += 1.0; }
-        if t > 1.0 { t -= 1.0; }
-        if t < 1.0 / 6.0 { return p + (q - p) * 6.0 * t; }
-        if t < 0.5 { return q; }
-        if t < 2.0 / 3.0 { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }
+        if t < 0.0 {
+            t += 1.0;
+        }
+        if t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            return p + (q - p) * 6.0 * t;
+        }
+        if t < 0.5 {
+            return q;
+        }
+        if t < 2.0 / 3.0 {
+            return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+        }
         p
     };
     (hue2rgb(h + 1.0 / 3.0), hue2rgb(h), hue2rgb(h - 1.0 / 3.0))
@@ -1588,17 +1667,28 @@ fn composite_layer(
                         "difference" => (s - d).abs(),
                         "exclusion" => s + d - 2.0 * s * d,
                         "color-dodge" => {
-                            if s >= 0.999 { 1.0 } else { (d / (1.0 - s)).min(1.0) }
+                            if s >= 0.999 {
+                                1.0
+                            } else {
+                                (d / (1.0 - s)).min(1.0)
+                            }
                         }
                         "color-burn" => {
-                            if s <= 0.001 { 0.0 } else { 1.0 - ((1.0 - d) / s).min(1.0) }
+                            if s <= 0.001 {
+                                0.0
+                            } else {
+                                1.0 - ((1.0 - d) / s).min(1.0)
+                            }
                         }
                         _ => s,
                     };
                     blended[i] = (out.clamp(0.0, 1.0) * 255.0) as u8;
                 }
             }
-            blend_pixel_over(dst, [blended[0], blended[1], blended[2], (sa * 255.0) as u8]);
+            blend_pixel_over(
+                dst,
+                [blended[0], blended[1], blended[2], (sa * 255.0) as u8],
+            );
         }
     }
 }
@@ -1628,7 +1718,11 @@ fn apply_shape_mask(src: &RgbaImage, mask_kind: &str, radius: u32) -> RgbaImage 
         "star" => "star",
         _ => "rectangle",
     };
-    let r = if mask_kind == "rounded" { radius.max(16) } else { 0 };
+    let r = if mask_kind == "rounded" {
+        radius.max(16)
+    } else {
+        0
+    };
     for y in 0..out.height() {
         for x in 0..out.width() {
             if !shape_hit(shape, x as f32 + 0.5, y as f32 + 0.5, w, h, r, 5, None) {
@@ -1686,7 +1780,12 @@ fn apply_inner_glow(src: &RgbaImage, color: [u8; 4], intensity: f32) -> RgbaImag
                     if d2 < min_d2 {
                         let nx = x + ox;
                         let ny = y + oy;
-                        if nx < 0 || ny < 0 || nx >= sw || ny >= sh || src.get_pixel(nx as u32, ny as u32)[3] < 32 {
+                        if nx < 0
+                            || ny < 0
+                            || nx >= sw
+                            || ny >= sh
+                            || src.get_pixel(nx as u32, ny as u32)[3] < 32
+                        {
                             min_d2 = d2;
                         }
                     }
@@ -1705,7 +1804,9 @@ fn apply_inner_glow(src: &RgbaImage, color: [u8; 4], intensity: f32) -> RgbaImag
 }
 
 fn apply_drop_shadow(src: &RgbaImage, sh: &DropShadow) -> (RgbaImage, i64, i64) {
-    let pad = (sh.blur.ceil() as i32 + sh.distance.ceil() as i32 + 6).min(60).max(4);
+    let pad = (sh.blur.ceil() as i32 + sh.distance.ceil() as i32 + 6)
+        .min(60)
+        .max(4);
     let nw = (src.width() as i32 + pad * 2) as u32;
     let nh = (src.height() as i32 + pad * 2) as u32;
 
@@ -1722,7 +1823,11 @@ fn apply_drop_shadow(src: &RgbaImage, sh: &DropShadow) -> (RgbaImage, i64, i64) 
                 let ty = y + pad + dy;
                 if tx >= 0 && ty >= 0 && tx < nw as i32 && ty < nh as i32 {
                     let sa = ((a as f32 / 255.0) * sh.opacity.clamp(0.0, 1.0) * 255.0) as u8;
-                    sil.put_pixel(tx as u32, ty as u32, Rgba([sh.color[0], sh.color[1], sh.color[2], sa]));
+                    sil.put_pixel(
+                        tx as u32,
+                        ty as u32,
+                        Rgba([sh.color[0], sh.color[1], sh.color[2], sa]),
+                    );
                 }
             }
         }
@@ -1791,13 +1896,22 @@ fn composite_layer_clipped(
                     let out = match blend_mode {
                         "multiply" => s * d,
                         "screen" => 1.0 - (1.0 - s) * (1.0 - d),
-                        "overlay" => if d < 0.5 { 2.0 * s * d } else { 1.0 - 2.0 * (1.0 - s) * (1.0 - d) },
+                        "overlay" => {
+                            if d < 0.5 {
+                                2.0 * s * d
+                            } else {
+                                1.0 - 2.0 * (1.0 - s) * (1.0 - d)
+                            }
+                        }
                         _ => s,
                     };
                     blended[i] = (out.clamp(0.0, 1.0) * 255.0) as u8;
                 }
             }
-            blend_pixel_over(dst, [blended[0], blended[1], blended[2], (sa * 255.0) as u8]);
+            blend_pixel_over(
+                dst,
+                [blended[0], blended[1], blended[2], (sa * 255.0) as u8],
+            );
         }
     }
 }
@@ -1810,9 +1924,7 @@ pub fn apply_alpha_mask_file(src: &RgbaImage, mask_path: &str) -> RgbaImage {
     let mask_luma = if mask_dyn.width() == w && mask_dyn.height() == h {
         mask_dyn.to_luma8()
     } else {
-        mask_dyn
-            .resize_exact(w, h, FilterType::Triangle)
-            .to_luma8()
+        mask_dyn.resize_exact(w, h, FilterType::Triangle).to_luma8()
     };
     let mut out = src.clone();
     for y in 0..h {
@@ -1856,7 +1968,10 @@ fn render_layer_into_canvas(
     layer.bounds_width = layer_img.width();
     layer.bounds_height = layer_img.height();
 
-    if !layer.visible || !is_group_visible(layer.group_id.as_deref(), groups_ref) || layer.opacity <= 0.001 {
+    if !layer.visible
+        || !is_group_visible(layer.group_id.as_deref(), groups_ref)
+        || layer.opacity <= 0.001
+    {
         return;
     }
 
@@ -1885,7 +2000,11 @@ fn render_layer_into_canvas(
         layer_img = image::imageops::flip_vertical(&layer_img);
     }
     if layer.inner_glow.enabled && layer.inner_glow.intensity > 0.5 {
-        layer_img = apply_inner_glow(&layer_img, layer.inner_glow.color, layer.inner_glow.intensity);
+        layer_img = apply_inner_glow(
+            &layer_img,
+            layer.inner_glow.color,
+            layer.inner_glow.intensity,
+        );
     }
 
     let mut draw_x = layer.x;
@@ -1899,7 +2018,11 @@ fn render_layer_into_canvas(
     }
     if layer.outer_glow.enabled && layer.outer_glow.intensity > 0.5 {
         let pad = (layer.outer_glow.intensity.ceil() as i64).min(40);
-        layer_img = apply_outer_glow(&layer_img, layer.outer_glow.color, layer.outer_glow.intensity);
+        layer_img = apply_outer_glow(
+            &layer_img,
+            layer.outer_glow.color,
+            layer.outer_glow.intensity,
+        );
         draw_x -= pad;
         draw_y -= pad;
     }
@@ -1976,7 +2099,19 @@ pub fn render_drag_split(
     let mut prev_canvas_alpha: Option<Vec<u8>> = None;
     let mut found_target = false;
     let mut has_above = false;
-    let mut target_preview: Option<(RgbaImage, i64, i64, u32, u32, i64, i64, f32, f32, f32, String)> = None;
+    let mut target_preview: Option<(
+        RgbaImage,
+        i64,
+        i64,
+        u32,
+        u32,
+        i64,
+        i64,
+        f32,
+        f32,
+        f32,
+        String,
+    )> = None;
 
     for layer in &mut snapshot.layers {
         if layer.id == target_layer_id {
@@ -2001,7 +2136,11 @@ pub fn render_drag_split(
                 layer_img = image::imageops::flip_vertical(&layer_img);
             }
             if layer.inner_glow.enabled && layer.inner_glow.intensity > 0.5 {
-                layer_img = apply_inner_glow(&layer_img, layer.inner_glow.color, layer.inner_glow.intensity);
+                layer_img = apply_inner_glow(
+                    &layer_img,
+                    layer.inner_glow.color,
+                    layer.inner_glow.intensity,
+                );
             }
             let mut pad_left = 0i64;
             let mut pad_top = 0i64;
@@ -2013,7 +2152,11 @@ pub fn render_drag_split(
             }
             if layer.outer_glow.enabled && layer.outer_glow.intensity > 0.5 {
                 let pad = (layer.outer_glow.intensity.ceil() as i64).min(40);
-                layer_img = apply_outer_glow(&layer_img, layer.outer_glow.color, layer.outer_glow.intensity);
+                layer_img = apply_outer_glow(
+                    &layer_img,
+                    layer.outer_glow.color,
+                    layer.outer_glow.intensity,
+                );
                 pad_left += pad;
                 pad_top += pad;
             }
@@ -2049,7 +2192,10 @@ pub fn render_drag_split(
                 ch,
             );
         } else {
-            if layer.visible && is_group_visible(layer.group_id.as_deref(), &groups_ref) && layer.opacity > 0.001 {
+            if layer.visible
+                && is_group_visible(layer.group_id.as_deref(), &groups_ref)
+                && layer.opacity > 0.001
+            {
                 has_above = true;
             }
             render_layer_into_canvas(
@@ -2063,8 +2209,19 @@ pub fn render_drag_split(
         }
     }
 
-    let (layer_img, layer_x, layer_y, layer_w, layer_h, pad_left, pad_top, scale, rotation, opacity, blend_mode) =
-        target_preview.ok_or_else(|| format!("Layer '{}' not found.", target_layer_id))?;
+    let (
+        layer_img,
+        layer_x,
+        layer_y,
+        layer_w,
+        layer_h,
+        pad_left,
+        pad_top,
+        scale,
+        rotation,
+        opacity,
+        blend_mode,
+    ) = target_preview.ok_or_else(|| format!("Layer '{}' not found.", target_layer_id))?;
 
     DynamicImage::ImageRgba8(below_canvas)
         .save(below_dest)

@@ -4,6 +4,7 @@ use crate::layers::{
 };
 use crate::tools::{internal_get_preview_base64, render_and_respond};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use tauri::Emitter;
 
@@ -33,8 +34,7 @@ fn appdata_dir() -> String {
 }
 
 fn local_appdata_dir() -> String {
-    std::env::var("LOCALAPPDATA")
-        .unwrap_or_else(|_| r"C:\Users\Public\AppData\Local".to_string())
+    std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\Users\Public\AppData\Local".to_string())
 }
 
 fn userprofile_dir() -> String {
@@ -222,7 +222,12 @@ fn find_claude_store_config(local_appdata: &str) -> Option<std::path::PathBuf> {
             if !name.starts_with("Claude") {
                 continue;
             }
-            if !pkg_dir.join("LocalCache").join("Roaming").join("Claude").is_dir() {
+            if !pkg_dir
+                .join("LocalCache")
+                .join("Roaming")
+                .join("Claude")
+                .is_dir()
+            {
                 continue;
             }
         }
@@ -255,9 +260,12 @@ pub fn scan_desktop_ai_clients() -> Vec<AiClientStatus> {
         &std::path::Path::new(&local_appdata).join("AnthropicClaude"),
         &["claude.exe", "Claude.exe"],
     ) || has_exe_in_dir(
-        &std::path::Path::new(&local_appdata).join("Programs").join("claude"),
+        &std::path::Path::new(&local_appdata)
+            .join("Programs")
+            .join("claude"),
         &["Claude.exe", "claude.exe"],
-    ) || std::path::Path::new(r"C:\Program Files\Claude\Claude.exe").is_file()
+    ) || std::path::Path::new(r"C:\Program Files\Claude\Claude.exe")
+        .is_file()
         || uninstall_reg_has("Claude");
 
     let claude_store_cfg = find_claude_store_config(&local_appdata);
@@ -309,7 +317,11 @@ pub fn scan_desktop_ai_clients() -> Vec<AiClientStatus> {
         out.push(AiClientStatus {
             id: "claude".to_string(),
             name: "Claude Desktop".to_string(),
-            install_type: if claude_classic_installed { "Web".to_string() } else { String::new() },
+            install_type: if claude_classic_installed {
+                "Web".to_string()
+            } else {
+                String::new()
+            },
             installed: claude_classic_installed,
             connected: cc,
             outdated: co,
@@ -318,20 +330,29 @@ pub fn scan_desktop_ai_clients() -> Vec<AiClientStatus> {
         });
     }
 
-    let lmstudio_cfg = std::path::Path::new(&userprofile).join(".lmstudio").join("mcp.json");
+    let lmstudio_cfg = std::path::Path::new(&userprofile)
+        .join(".lmstudio")
+        .join("mcp.json");
     let lmstudio_installed = has_exe_in_dir(
         &std::path::Path::new(&local_appdata).join("LM-Studio"),
         &["LM Studio.exe"],
     ) || has_exe_in_dir(
-        &std::path::Path::new(&local_appdata).join("Programs").join("LM Studio"),
+        &std::path::Path::new(&local_appdata)
+            .join("Programs")
+            .join("LM Studio"),
         &["LM Studio.exe"],
-    ) || std::path::Path::new(r"C:\Program Files\LM Studio\LM Studio.exe").is_file()
+    ) || std::path::Path::new(r"C:\Program Files\LM Studio\LM Studio.exe")
+        .is_file()
         || uninstall_reg_has("LM Studio");
     let (lm_conn, lm_out) = json_veltrax_status(&lmstudio_cfg, &cur_exe);
     out.push(AiClientStatus {
         id: "lmstudio".to_string(),
         name: "LM Studio".to_string(),
-        install_type: if lmstudio_installed { "Desktop".to_string() } else { String::new() },
+        install_type: if lmstudio_installed {
+            "Desktop".to_string()
+        } else {
+            String::new()
+        },
         installed: lmstudio_installed,
         connected: lm_conn,
         outdated: lm_out,
@@ -340,20 +361,39 @@ pub fn scan_desktop_ai_clients() -> Vec<AiClientStatus> {
     });
 
     let codex_cfg = [
-        std::path::Path::new(&userprofile).join(".codex").join("config.toml"),
-        std::path::Path::new(&appdata).join("codex").join("config.toml"),
+        std::path::Path::new(&userprofile)
+            .join(".codex")
+            .join("config.toml"),
+        std::path::Path::new(&appdata)
+            .join("codex")
+            .join("config.toml"),
     ]
     .into_iter()
     .find(|p| p.is_file())
-    .unwrap_or_else(|| std::path::Path::new(&userprofile).join(".codex").join("config.toml"));
+    .unwrap_or_else(|| {
+        std::path::Path::new(&userprofile)
+            .join(".codex")
+            .join("config.toml")
+    });
     let codex_installed = cmd_in_path("codex")
-        || std::path::Path::new(&appdata).join("npm").join("codex.cmd").is_file()
-        || std::path::Path::new(&userprofile).join(".cargo").join("bin").join("codex.exe").is_file();
+        || std::path::Path::new(&appdata)
+            .join("npm")
+            .join("codex.cmd")
+            .is_file()
+        || std::path::Path::new(&userprofile)
+            .join(".cargo")
+            .join("bin")
+            .join("codex.exe")
+            .is_file();
     let (codex_conn, codex_out) = toml_veltrax_status(&codex_cfg, &cur_exe);
     out.push(AiClientStatus {
         id: "codex".to_string(),
         name: "ChatGPT / Codex".to_string(),
-        install_type: if codex_installed { "CLI".to_string() } else { String::new() },
+        install_type: if codex_installed {
+            "CLI".to_string()
+        } else {
+            String::new()
+        },
         installed: codex_installed,
         connected: codex_conn,
         outdated: codex_out,
@@ -362,25 +402,42 @@ pub fn scan_desktop_ai_clients() -> Vec<AiClientStatus> {
     });
 
     let cursor_cfg = [
-        std::path::Path::new(&userprofile).join(".cursor").join("mcp.json"),
-        std::path::Path::new(&appdata).join("Cursor").join("User").join("globalStorage").join("mcp.json"),
+        std::path::Path::new(&userprofile)
+            .join(".cursor")
+            .join("mcp.json"),
+        std::path::Path::new(&appdata)
+            .join("Cursor")
+            .join("User")
+            .join("globalStorage")
+            .join("mcp.json"),
     ]
     .into_iter()
     .find(|p| p.is_file())
-    .unwrap_or_else(|| std::path::Path::new(&userprofile).join(".cursor").join("mcp.json"));
+    .unwrap_or_else(|| {
+        std::path::Path::new(&userprofile)
+            .join(".cursor")
+            .join("mcp.json")
+    });
     let cursor_installed = has_exe_in_dir(
-        &std::path::Path::new(&local_appdata).join("Programs").join("cursor"),
+        &std::path::Path::new(&local_appdata)
+            .join("Programs")
+            .join("cursor"),
         &["Cursor.exe"],
     ) || has_exe_in_dir(
         &std::path::Path::new(&local_appdata).join("cursor"),
         &["Cursor.exe"],
-    ) || std::path::Path::new(r"C:\Program Files\cursor\Cursor.exe").is_file()
+    ) || std::path::Path::new(r"C:\Program Files\cursor\Cursor.exe")
+        .is_file()
         || uninstall_reg_has("Cursor");
     let (cursor_conn, cursor_out) = json_veltrax_status(&cursor_cfg, &cur_exe);
     out.push(AiClientStatus {
         id: "cursor".to_string(),
         name: "Cursor".to_string(),
-        install_type: if cursor_installed { "Desktop".to_string() } else { String::new() },
+        install_type: if cursor_installed {
+            "Desktop".to_string()
+        } else {
+            String::new()
+        },
         installed: cursor_installed,
         connected: cursor_conn,
         outdated: cursor_out,
@@ -413,7 +470,8 @@ fn write_json_mcp_entry(config_path: &std::path::Path, exe_str: &str) -> Result<
         })?
     } else {
         if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create directory: {}", e))?;
         }
         json!({})
     };
@@ -447,8 +505,8 @@ pub fn connect_ai_client(client_id: String) -> Result<String, String> {
         ));
     }
 
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("Failed to get executable path: {}", e))?;
+    let exe_path =
+        std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
     let exe_str = exe_path.to_string_lossy().replace('\\', "/");
 
     let cfg = std::path::PathBuf::from(&client.config_path);
@@ -568,8 +626,8 @@ pub fn connect_all_detected() -> Result<Vec<String>, String> {
 
 #[tauri::command]
 pub fn get_mcp_snippets() -> Result<McpSnippets, String> {
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("Failed to get executable path: {}", e))?;
+    let exe_path =
+        std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
     let exe_str = exe_path.to_string_lossy().replace('\\', "/");
     let exe_command = format!("\"{}\" --mcp", exe_str);
     let json_snippet = serde_json::to_string_pretty(&json!({
@@ -611,7 +669,11 @@ pub fn check_mcp_real_status() -> McpRealStatus {
     let claude_client = clients
         .iter()
         .find(|c| (c.id == "claude" || c.id == "claude_store") && c.connected)
-        .or_else(|| clients.iter().find(|c| c.id == "claude" || c.id == "claude_store"));
+        .or_else(|| {
+            clients
+                .iter()
+                .find(|c| c.id == "claude" || c.id == "claude_store")
+        });
     let config_path_str = claude_client
         .map(|c| c.config_path.clone())
         .unwrap_or_default();
@@ -687,6 +749,220 @@ pub fn start_internal_server(state: SharedProjectState, app_handle: tauri::AppHa
     });
 }
 
+fn handle_mcp_project_tool(
+    tool: &str,
+    args: &Value,
+    state: &SharedProjectState,
+    app_handle: &tauri::AppHandle,
+) -> Option<Value> {
+    let result: Result<Value, String> = (|| match tool {
+        "list_projects" => {
+            let (projects, warning) = crate::storage::get_recent_projects()?;
+            Ok(json!({"projects":projects,"warning":warning}))
+        }
+        "list_templates" => {
+            let templates = crate::templates::list_all_templates()?;
+            let list: Vec<Value> = templates.into_iter().map(|t| json!({
+                    "id":t.id,"name":t.name,"category":t.category,"builtin":t.builtin,
+                    "file_path":t.file_path,"canvas_width":t.canvas_width,"canvas_height":t.canvas_height,
+                    "fields":t.fields
+                })).collect();
+            Ok(json!(list))
+        }
+        "get_brand_kit" => {
+            let store = crate::brand::list_brand_kits()?;
+            if let Some(id) = args["brand_kit_id"].as_str() {
+                let kit = store
+                    .kits
+                    .iter()
+                    .find(|k| k.id == id)
+                    .ok_or_else(|| format!("Brand kit '{}' not found.", id))?;
+                Ok(json!({"active_id":store.active_id,"kit":kit}))
+            } else {
+                Ok(json!(store))
+            }
+        }
+        "list_library" => Ok(json!(crate::tools::get_user_library()?)),
+        "list_fonts" => Ok(json!(crate::tools::list_imported_fonts()?)),
+        "create_project" => {
+            let width = args["width"]
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or("Missing or invalid 'width'")?;
+            let height = args["height"]
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or("Missing or invalid 'height'")?;
+            if width > 16_384 || height > 16_384 || width as u64 * height as u64 > 100_000_000 {
+                return Err("Canvas must be at most 16384 px per side and 100 MP.".into());
+            }
+            let mut resp = crate::tools::create_project_from_state(
+                state,
+                width,
+                height,
+                args["transparent_bg"].as_bool().unwrap_or(false),
+                args["project_name"].as_str().map(str::to_string),
+            )?;
+            if let Some(hex) = args["background_color"].as_str() {
+                if !args["transparent_bg"].as_bool().unwrap_or(false) {
+                    let mut s = state.lock().map_err(|e| e.to_string())?;
+                    s.current.bg_color = parse_hex_color(hex);
+                    s.dirty = true;
+                    resp = render_and_respond(&mut s)?;
+                    if let Some(path) = s.project_file_path.clone() {
+                        let json =
+                            serde_json::to_string_pretty(&s.current).map_err(|e| e.to_string())?;
+                        crate::storage::atomic_write_str(std::path::Path::new(&path), &json)?;
+                        s.dirty = false;
+                        let _ = crate::storage::record_recent_project(&path, &s.current, None);
+                    }
+                }
+            }
+            app_handle
+                .emit("mcp-project-created", &resp)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(resp).map_err(|e| e.to_string())?)
+        }
+        "create_from_template" => {
+            let template_id = args["template_id"]
+                .as_str()
+                .ok_or("Missing 'template_id'")?
+                .to_string();
+            let mut variables = HashMap::new();
+            if let Some(object) = args["variables"].as_object() {
+                for (k, v) in object {
+                    let text = match v {
+                        Value::String(s) => s.clone(),
+                        Value::Null => String::new(),
+                        _ => v.to_string(),
+                    };
+                    variables.insert(k.clone(), text);
+                }
+            }
+            let resp = crate::templates::create_project_from_vtemplate_state(
+                state,
+                template_id,
+                variables,
+                args["project_name"].as_str().map(str::to_string),
+                args["brand_kit_id"].as_str().map(str::to_string),
+            )?;
+            app_handle
+                .emit("mcp-project-created", &resp)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(resp).map_err(|e| e.to_string())?)
+        }
+        "export_image" => {
+            let path = args["output_path"]
+                .as_str()
+                .ok_or("Missing 'output_path'")?;
+            let format = args["format"]
+                .as_str()
+                .or_else(|| {
+                    std::path::Path::new(path)
+                        .extension()
+                        .and_then(|s| s.to_str())
+                })
+                .unwrap_or("png");
+            let quality = args["quality"].as_u64().unwrap_or(90);
+            let quality = u8::try_from(quality).map_err(|_| "Invalid 'quality'")?;
+            let path = crate::tools::export_image_from_state(state, path, format, quality)?;
+            Ok(json!({"path":path,"format":format}))
+        }
+        "save_project" => {
+            {
+                let s = state.lock().map_err(|e| e.to_string())?;
+                if !s.is_in_editor || !s.has_project {
+                    return Err("Action blocked: open a project in the Editor first.".into());
+                }
+            }
+            let resp = if let Some(path) = args["path"].as_str().filter(|p| !p.trim().is_empty()) {
+                crate::tools::save_project_file_from_state(state, path)?
+            } else {
+                crate::tools::save_current_project_from_state(state)?
+            };
+            Ok(serde_json::to_value(resp).map_err(|e| e.to_string())?)
+        }
+        "save_as_template" => {
+            {
+                let s = state.lock().map_err(|e| e.to_string())?;
+                if !s.is_in_editor || !s.has_project {
+                    return Err("Action blocked: open a project in the Editor first.".into());
+                }
+            }
+            let fields: Vec<crate::templates::TemplateField> =
+                serde_json::from_value(args["fields"].clone())
+                    .map_err(|e| format!("Invalid 'fields': {}", e))?;
+            let summary = crate::templates::save_current_as_vtemplate_from_state(
+                state,
+                args["name"].as_str().ok_or("Missing 'name'")?.to_string(),
+                args["category"].as_str().unwrap_or("Custom").to_string(),
+                fields,
+            )?;
+            Ok(serde_json::to_value(summary).map_err(|e| e.to_string())?)
+        }
+        "apply_brand_kit" => {
+            let mut s = state.lock().map_err(|e| e.to_string())?;
+            if !s.is_in_editor || !s.has_project {
+                return Err("Action blocked: open a project in the Editor first.".into());
+            }
+            let store = crate::brand::load_brand_store();
+            let id = args["brand_kit_id"].as_str().unwrap_or(&store.active_id);
+            let kit = store
+                .kits
+                .iter()
+                .find(|k| k.id == id)
+                .ok_or_else(|| format!("Brand kit '{}' not found.", id))?;
+            s.push_undo();
+            let primary_color = kit.colors.first().map(|c| parse_hex_color(&c.hex));
+            let primary_font = kit.fonts.first().cloned();
+            let primary_logo = kit.logos.first().map(|l| l.path.clone());
+            for layer in &mut s.current.layers {
+                match &mut layer.kind {
+                    LayerKind::Shape { fill_color, .. } => {
+                        if let Some(color) = primary_color {
+                            *fill_color = color;
+                        }
+                    }
+                    LayerKind::Text3D { font_style, .. } => {
+                        if let Some(font) = &primary_font {
+                            *font_style = font.clone();
+                        }
+                    }
+                    LayerKind::Image { source_path, .. } => {
+                        if let Some(path) = &primary_logo {
+                            if std::path::Path::new(path).is_file() {
+                                *source_path = path.clone();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            s.dirty = true;
+            let resp = render_and_respond(&mut s)?;
+            drop(s);
+            app_handle
+                .emit("mcp-project-updated", &resp)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(resp).map_err(|e| e.to_string())?)
+        }
+        _ => return Ok(Value::Null),
+    })();
+    match result {
+        Ok(v) if v.is_null() => None,
+        Ok(v) => Some(json!({"success":true,"result":v})),
+        Err(e)
+            if tool == "create_project"
+                || tool == "create_from_template"
+                || tool == "apply_brand_kit"
+                || tool == "save_project" =>
+        {
+            Some(json!({"error":e}))
+        }
+        Err(e) => Some(json!({"error":e})),
+    }
+}
+
 fn blocked_response() -> Value {
     json!({
         "error": "blocked",
@@ -703,7 +979,7 @@ fn handle_internal_request(
     match url {
         "/health" => json!({
             "status": "ok",
-            "version": "1.0.0",
+            "version": env!("CARGO_PKG_VERSION"),
             "engine": "veltrax-studios"
         }),
         "/tool/inspect" => {
@@ -711,15 +987,21 @@ fn handle_internal_request(
             if !s.is_in_editor || !s.has_project || s.preview_path.is_empty() {
                 return blocked_response();
             }
+            let project = serde_json::to_value(&s.current).unwrap_or(json!({}));
             let layers_json = serde_json::to_value(&s.current.layers).unwrap_or(json!([]));
             let (w, h) = (s.current.canvas_width, s.current.canvas_height);
             let preview_path = s.preview_path.clone();
             let transparent = s.current.transparent_bg;
+            let dirty = s.dirty;
+            let project_file_path = s.project_file_path.clone();
             drop(s);
 
             match internal_get_preview_base64(&preview_path) {
                 Ok((b64, _, _)) => json!({
                     "success": true,
+                    "project": project,
+                    "project_file_path": project_file_path,
+                    "dirty": dirty,
                     "canvas_width": w,
                     "canvas_height": h,
                     "transparent_bg": transparent,
@@ -732,6 +1014,9 @@ fn handle_internal_request(
         "/tool/execute" => {
             let params: Value = serde_json::from_str(body).unwrap_or(json!({}));
             let tool = params["tool"].as_str().unwrap_or("");
+            if let Some(response) = handle_mcp_project_tool(tool, &params, state, app_handle) {
+                return response;
+            }
 
             let mut s = state.lock().unwrap();
             if !s.is_in_editor || !s.has_project {
@@ -843,8 +1128,14 @@ fn execute_mcp_layer_tool(
             render_and_respond(s)
         }
         "add_3d_text" => {
-            let content = p["content"].as_str().ok_or("Missing 'content'")?.to_string();
-            let font_style = p["font_style"].as_str().unwrap_or("bold_display").to_string();
+            let content = p["content"]
+                .as_str()
+                .ok_or("Missing 'content'")?
+                .to_string();
+            let font_style = p["font_style"]
+                .as_str()
+                .unwrap_or("bold_display")
+                .to_string();
             let size = p["size"].as_f64().unwrap_or(72.0) as f32;
             let color = parse_hex_color(p["color_hex"].as_str().unwrap_or("#FFFFFF"));
             let depth = p["depth_3d"].as_u64().unwrap_or(6) as u32;
@@ -904,7 +1195,10 @@ fn execute_mcp_layer_tool(
         }
         "update_text_layer" => {
             let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
-            let content = p["content"].as_str().ok_or("Missing 'content'")?.to_string();
+            let content = p["content"]
+                .as_str()
+                .ok_or("Missing 'content'")?
+                .to_string();
             s.push_undo();
             let layer = s
                 .current
@@ -1136,7 +1430,10 @@ fn execute_mcp_layer_tool(
             let text = p["text"].as_str().ok_or("Missing 'text'")?.to_string();
             let opacity = (p["opacity"].as_f64().unwrap_or(0.4) as f32).clamp(0.05, 1.0);
             let position = p["position"].as_str().unwrap_or("bottom-right").to_string();
-            let font_style = p["font_style"].as_str().unwrap_or("classic_serif").to_string();
+            let font_style = p["font_style"]
+                .as_str()
+                .unwrap_or("classic_serif")
+                .to_string();
             let color = parse_hex_color(p["color_hex"].as_str().unwrap_or("#FFFFFF80"));
             let size = (p["size"].as_f64().unwrap_or(28.0) as f32).max(8.0);
             let cw = s.current.canvas_width;
@@ -1586,8 +1883,10 @@ fn execute_mcp_layer_tool(
                     }
                     if p["clear_gradient"].as_bool() == Some(true) {
                         *gradient_colors = None;
-                    } else if p["gradient_from_hex"].is_string() || p["gradient_to_hex"].is_string() {
-                        let cur = gradient_colors.unwrap_or([[255, 255, 255, 255], [56, 189, 248, 255]]);
+                    } else if p["gradient_from_hex"].is_string() || p["gradient_to_hex"].is_string()
+                    {
+                        let cur =
+                            gradient_colors.unwrap_or([[255, 255, 255, 255], [56, 189, 248, 255]]);
                         let from = p["gradient_from_hex"]
                             .as_str()
                             .map(parse_hex_color)
@@ -1701,10 +2000,18 @@ fn execute_mcp_layer_tool(
             let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0u32, 0u32);
             for (x, y, px) in rendered.enumerate_pixels() {
                 if px[3] > 0 {
-                    if x < min_x { min_x = x; }
-                    if y < min_y { min_y = y; }
-                    if x > max_x { max_x = x; }
-                    if y > max_y { max_y = y; }
+                    if x < min_x {
+                        min_x = x;
+                    }
+                    if y < min_y {
+                        min_y = y;
+                    }
+                    if x > max_x {
+                        max_x = x;
+                    }
+                    if y > max_y {
+                        max_y = y;
+                    }
                 }
             }
             if min_x > max_x || min_y > max_y {
@@ -1742,7 +2049,11 @@ fn execute_mcp_layer_tool(
             let tol_sq = (tol as i32) * (tol as i32) * 3;
             let tval = if erase { 0u8 } else { 255u8 };
             let mut mask = if let Some(ref mp) = layer.alpha_mask_path {
-                image::open(mp).map(|d| d.resize_exact(w, h, image::imageops::FilterType::Triangle).to_luma8())
+                image::open(mp)
+                    .map(|d| {
+                        d.resize_exact(w, h, image::imageops::FilterType::Triangle)
+                            .to_luma8()
+                    })
                     .unwrap_or_else(|_| image::GrayImage::from_pixel(w, h, image::Luma([255u8])))
             } else {
                 image::GrayImage::from_pixel(w, h, image::Luma([255u8]))
@@ -1760,7 +2071,12 @@ fn execute_mcp_layer_tool(
                 vis[(y * w + x) as usize] = true;
                 while let Some((cx, cy)) = q.pop_front() {
                     mask.put_pixel(cx, cy, image::Luma([tval]));
-                    for (nx, ny) in [(cx.wrapping_sub(1), cy), (cx + 1, cy), (cx, cy.wrapping_sub(1)), (cx, cy + 1)] {
+                    for (nx, ny) in [
+                        (cx.wrapping_sub(1), cy),
+                        (cx + 1, cy),
+                        (cx, cy.wrapping_sub(1)),
+                        (cx, cy + 1),
+                    ] {
                         if nx < w && ny < h {
                             let idx = (ny * w + nx) as usize;
                             if !vis[idx] && matches(base_img.get_pixel(nx, ny).0) {
@@ -1780,10 +2096,21 @@ fn execute_mcp_layer_tool(
                 }
             }
             let appdata = appdata_dir();
-            let dir = std::path::PathBuf::from(appdata).join("Veltrax Studios").join("masks");
+            let dir = std::path::PathBuf::from(appdata)
+                .join("Veltrax Studios")
+                .join("masks");
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            let dest = dir.join(format!("{}_mcp_{}.png", lid, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()));
-            image::DynamicImage::ImageLuma8(mask).save(&dest).map_err(|e| e.to_string())?;
+            let dest = dir.join(format!(
+                "{}_mcp_{}.png",
+                lid,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            ));
+            image::DynamicImage::ImageLuma8(mask)
+                .save(&dest)
+                .map_err(|e| e.to_string())?;
             layer.alpha_mask_path = Some(dest.to_string_lossy().to_string());
             render_and_respond(s)
         }
@@ -1811,24 +2138,40 @@ fn execute_mcp_layer_tool(
             let base_img = crate::layers::render_layer_kind(&layer.kind)?;
             let (w, h) = (base_img.width(), base_img.height());
             let mut mask = if let Some(ref mp) = layer.alpha_mask_path {
-                image::open(mp).map(|d| d.resize_exact(w, h, image::imageops::FilterType::Triangle).to_luma8())
+                image::open(mp)
+                    .map(|d| {
+                        d.resize_exact(w, h, image::imageops::FilterType::Triangle)
+                            .to_luma8()
+                    })
                     .unwrap_or_else(|_| image::GrayImage::from_pixel(w, h, image::Luma([255u8])))
             } else {
                 image::GrayImage::from_pixel(w, h, image::Luma([255u8]))
             };
             for py in 0..h {
                 for px in 0..w {
-                    let inside = crate::layers::point_in_polygon(px as f32 + 0.5, py as f32 + 0.5, &verts);
+                    let inside =
+                        crate::layers::point_in_polygon(px as f32 + 0.5, py as f32 + 0.5, &verts);
                     if (erase_inside && inside) || (!erase_inside && !inside) {
                         mask.put_pixel(px, py, image::Luma([0u8]));
                     }
                 }
             }
             let appdata = appdata_dir();
-            let dir = std::path::PathBuf::from(appdata).join("Veltrax Studios").join("masks");
+            let dir = std::path::PathBuf::from(appdata)
+                .join("Veltrax Studios")
+                .join("masks");
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            let dest = dir.join(format!("{}_lasso_{}.png", lid, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()));
-            image::DynamicImage::ImageLuma8(mask).save(&dest).map_err(|e| e.to_string())?;
+            let dest = dir.join(format!(
+                "{}_lasso_{}.png",
+                lid,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            ));
+            image::DynamicImage::ImageLuma8(mask)
+                .save(&dest)
+                .map_err(|e| e.to_string())?;
             layer.alpha_mask_path = Some(dest.to_string_lossy().to_string());
             render_and_respond(s)
         }
@@ -1845,7 +2188,10 @@ fn execute_mcp_layer_tool(
             let font_size = p["font_size"].as_u64().unwrap_or(60) as f32;
             let color = parse_hex_color(p["color"].as_str().unwrap_or("#FFFFFF"));
             s.push_undo();
-            let (cx, cy) = (s.current.canvas_width as i64 / 2, s.current.canvas_height as i64 / 2);
+            let (cx, cy) = (
+                s.current.canvas_width as i64 / 2,
+                s.current.canvas_height as i64 / 2,
+            );
             let id = format!(
                 "smart_text_{}",
                 std::time::SystemTime::now()
@@ -1902,7 +2248,7 @@ fn execute_mcp_layer_tool(
         }
         "get_project_state" => {
             let snap_json = serde_json::to_value(&s.current).map_err(|e| e.to_string())?;
-            let mut resp = s.to_response();
+            let resp = s.to_response();
             // Return standard ProjectResponse while also logging/attaching state
             let _ = snap_json;
             Ok(resp)
@@ -1912,6 +2258,128 @@ fn execute_mcp_layer_tool(
 }
 
 // ── MCP stdio Server (--mcp) ────────────────────────────────────────────────
+
+fn mcp_result(result: Result<String, String>) -> Value {
+    match result {
+        Ok(text) => json!({ "content": [{ "type": "text", "text": text }] }),
+        Err(text) => json!({ "content": [{ "type": "text", "text": text }], "isError": true }),
+    }
+}
+
+fn mcp_render_template(args: &Value) -> Value {
+    let result = (|| -> Result<String, String> {
+        let template_ref = args["template"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or("Missing 'template'")?;
+        let output_path = args["output_file"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or("Missing 'output_file'")?;
+        let mut variables = std::collections::HashMap::new();
+        if let Some(values) = args["variables"].as_object() {
+            for (key, value) in values {
+                let text = match value {
+                    Value::String(text) => text.clone(),
+                    Value::Null => String::new(),
+                    other => other.to_string(),
+                };
+                variables.insert(key.clone(), text);
+            }
+        } else if !args["variables"].is_null() {
+            return Err("'variables' must be an object.".to_string());
+        }
+        let size = match (args["width"].as_u64(), args["height"].as_u64()) {
+            (None, None) => None,
+            (Some(width), Some(height)) => {
+                if width == 0
+                    || height == 0
+                    || width > 16_384
+                    || height > 16_384
+                    || width * height > 100_000_000
+                {
+                    return Err(
+                        "Size must be between 1 and 16384 px per side and at most 100 MP."
+                            .to_string(),
+                    );
+                }
+                Some((width as u32, height as u32))
+            }
+            _ => return Err("'width' and 'height' must be supplied together.".to_string()),
+        };
+        let format = args["format"]
+            .as_str()
+            .or_else(|| {
+                std::path::Path::new(output_path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+            })
+            .unwrap_or("png");
+        let quality = args["quality"].as_u64().unwrap_or(90);
+        if !(1..=100).contains(&quality) {
+            return Err("'quality' must be an integer from 1 to 100.".to_string());
+        }
+        let output = std::path::Path::new(output_path);
+        if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not create output directory: {}", error))?;
+        }
+        crate::batch::cli_render_template(
+            template_ref,
+            &variables,
+            output,
+            format,
+            quality as u8,
+            size,
+        )?;
+        Ok(format!("Rendered template to {}", output_path))
+    })();
+    mcp_result(result)
+}
+
+fn mcp_render_template_batch(args: &Value) -> Value {
+    let result = (|| -> Result<String, String> {
+        let template_ref = args["template"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or("Missing 'template'")?;
+        let data = args["data"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or("Missing CSV/JSON 'data'")?;
+        let output_dir = args["output_dir"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or("Missing 'output_dir'")?;
+        let rows = crate::batch::parse_batch_rows(data)?;
+        let format = args["format"].as_str().unwrap_or("png");
+        let quality = args["quality"].as_u64().unwrap_or(90);
+        if !(1..=100).contains(&quality) {
+            return Err("'quality' must be an integer from 1 to 100.".to_string());
+        }
+        let pattern = args["filename_pattern"].as_str().unwrap_or("{index}");
+        let summary = crate::batch::cli_batch_render(
+            template_ref,
+            &rows,
+            std::path::Path::new(output_dir),
+            pattern,
+            format,
+            quality as u8,
+        )?;
+        let mut text = format!("Batch rendered {} image(s).", summary.saved.len());
+        for path in summary.saved {
+            text.push_str(&format!("\nSaved: {}", path));
+        }
+        if !summary.errors.is_empty() {
+            for error in &summary.errors {
+                text.push_str(&format!("\nError: {}", error));
+            }
+            return Err(text);
+        }
+        Ok(text)
+    })();
+    mcp_result(result)
+}
 
 pub fn run_mcp_stdio() {
     let stdin = std::io::stdin();
@@ -1945,7 +2413,7 @@ pub fn run_mcp_stdio() {
             "initialize" => Some(json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "veltrax-studios", "version": "1.0.0" }
+                "serverInfo": { "name": "veltrax-studios", "version": env!("CARGO_PKG_VERSION") }
             })),
             "notifications/initialized" => continue,
             "ping" => Some(json!({})),
@@ -1953,7 +2421,30 @@ pub fn run_mcp_stdio() {
             "tools/call" => {
                 let tool_name = params["name"].as_str().unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                Some(forward_tool_call(tool_name, &args))
+                Some(match tool_name {
+                    "render_template" => mcp_render_template(&args),
+                    "render_template_batch" | "batch_render" => mcp_render_template_batch(&args),
+                    "get_app_version" => mcp_result(Ok(crate::support::get_app_version())),
+                    "get_feedback_diagnostics" => {
+                        mcp_result(Ok(crate::support::get_feedback_diagnostics(
+                            args["screen_width"]
+                                .as_u64()
+                                .and_then(|value| u32::try_from(value).ok()),
+                            args["screen_height"]
+                                .as_u64()
+                                .and_then(|value| u32::try_from(value).ok()),
+                        )))
+                    }
+                    "open_feedback_site" => mcp_result(crate::support::open_feedback_site()),
+                    "record_local_error" => mcp_result(
+                        crate::support::record_local_error(
+                            args["source"].as_str().unwrap_or("").to_string(),
+                            args["error_message"].as_str().unwrap_or("").to_string(),
+                        )
+                        .map(|()| "Error appended to local log.".to_string()),
+                    ),
+                    _ => forward_tool_call(tool_name, &args),
+                })
             }
             _ => {
                 let r = json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":format!("Method '{}' not found",method)}});
@@ -2445,9 +2936,91 @@ fn build_tools_description() -> Value {
                 "name": "get_project_state",
                 "description": "Return the current Veltrax Studios project state including all layers, canvas dimensions, and effects.",
                 "inputSchema": { "type": "object", "properties": {}, "required": [] }
+            },
+            {
+                "name": "render_template",
+                "description": "Render a .vtemplate by ID, name, or file path to one PNG, JPEG, or WebP image. This is distinct from add_smart_text, which edits a layer in the active project.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "template": { "type": "string" },
+                        "variables": { "type": "object" },
+                        "output_file": { "type": "string" },
+                        "format": { "type": "string", "enum": ["png", "jpeg", "webp"] },
+                        "quality": { "type": "integer", "minimum": 1, "maximum": 100 },
+                        "width": { "type": "integer", "minimum": 1, "maximum": 16384 },
+                        "height": { "type": "integer", "minimum": 1, "maximum": 16384 }
+                    },
+                    "required": ["template", "output_file"]
+                }
+            },
+            {
+                "name": "render_template_batch",
+                "description": "Render a CSV (with header) or JSON array of rows using a .vtemplate and save one image per row. Existing output files are never overwritten.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "template": { "type": "string" },
+                        "data": { "type": "string", "description": "CSV text with a header row or a JSON array of objects." },
+                        "output_dir": { "type": "string" },
+                        "filename_pattern": { "type": "string", "description": "Supports {index} and {column_name} placeholders." },
+                        "format": { "type": "string", "enum": ["png", "jpeg", "webp"] },
+                        "quality": { "type": "integer", "minimum": 1, "maximum": 100 }
+                    },
+                "required": ["template", "data", "output_dir"]
+            },
+            },
+            {
+                "name": "record_local_error",
+                "description": "Append an explicitly provided frontend error to the local rotating log only. The message is truncated and is not transmitted or included verbatim in feedback diagnostics.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source": { "type": "string", "enum": ["webview", "unhandled_promise", "frontend"] },
+                        "error_message": { "type": "string", "maxLength": 2000 }
+                    },
+                    "required": ["source", "error_message"]
+                }
+            },
+            {
+                "name": "get_feedback_diagnostics",
+                "description": "Return a privacy-filtered local diagnostic block (version, OS, optional screen resolution, and recent local error categories). No data is transmitted.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "screen_width": { "type": "integer", "minimum": 1 },
+                        "screen_height": { "type": "integer", "minimum": 1 }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "open_feedback_site",
+                "description": "Open the configured project feedback URL in the user's browser. Does not submit diagnostics or any other data.",
+                "inputSchema": { "type": "object", "properties": {}, "required": [] }
+            },
+            {
+                "name": "get_app_version",
+                "description": "Return the running Veltrax Studios version from the Cargo package metadata.",
+                "inputSchema": { "type": "object", "properties": {}, "required": [] }
             }
         ])).unwrap_or_default();
     tools.extend(more);
+    let phase_g: Vec<Value> = serde_json::from_value(json!([
+        {"name":"create_project","description":"Create a new blank .veltrax project (1–16384 px per side, maximum 100 MP). Available from Dashboard; the app switches to Editor after creation.","inputSchema":{"type":"object","properties":{"width":{"type":"integer","minimum":1,"maximum":16384},"height":{"type":"integer","minimum":1,"maximum":16384},"transparent_bg":{"type":"boolean","default":false},"project_name":{"type":"string"},"background_color":{"type":"string","description":"Optional hex background color; currently used only when transparent_bg is false."}},"required":["width","height"]}},
+        {"name":"export_image","description":"Render the active project to an image file. Allowed from Dashboard when a project is loaded; writes atomically and refuses to overwrite an existing file.","inputSchema":{"type":"object","properties":{"output_path":{"type":"string"},"format":{"type":"string","enum":["png","jpeg","jpg","webp","svg","pdf","ico"]},"quality":{"type":"integer","minimum":1,"maximum":100}},"required":["output_path"]}},
+        {"name":"save_project","description":"Save the active project in the existing .veltrax JSON format. Omit path to save to its current location; set path to Save As. Editor gate applies.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Optional destination path, normally ending in .veltrax."}},"required":[]}},
+        {"name":"list_projects","description":"List recent Veltrax projects (paths, names, dimensions, timestamps, thumbnails and existence). Available from Dashboard.","inputSchema":{"type":"object","properties":{},"required":[]}},
+        {"name":"list_templates","description":"List available .vtemplate templates with IDs, names, categories, dimensions and variable fields. Available from Dashboard.","inputSchema":{"type":"object","properties":{},"required":[]}},
+        {"name":"create_from_template","description":"Create a new .veltrax project from a template, applying variable values and an optional brand kit. Available from Dashboard; the app switches to Editor after creation.","inputSchema":{"type":"object","properties":{"template_id":{"type":"string"},"variables":{"type":"object","additionalProperties":{"type":"string"}},"project_name":{"type":"string"},"brand_kit_id":{"type":"string"}},"required":["template_id"]}},
+        {"name":"save_as_template","description":"Save the active project as a reusable .vtemplate with optional variable fields. Editor gate applies.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"category":{"type":"string"},"fields":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"label":{"type":"string"},"kind":{"type":"string","enum":["text","image","color"]},"layer_id":{"type":"string"},"variable_name":{"type":"string"},"default_value":{"type":"string"},"image_fit":{"type":"string","enum":["cover","contain"]}},"required":["id","label","kind","layer_id"]}}},"required":["name","category","fields"]}},
+        {"name":"batch_render","description":"Batch-render rows of CSV or JSON data into images from a template; alias of render_template_batch and allowed from Dashboard.","inputSchema":{"type":"object","properties":{"template":{"type":"string"},"data":{"type":"string","description":"CSV text with headers or a JSON array of objects."},"output_dir":{"type":"string"},"filename_pattern":{"type":"string"},"format":{"type":"string","enum":["png","jpeg","webp"]},"quality":{"type":"integer","minimum":1,"maximum":100}},"required":["template","data","output_dir"]}},
+        {"name":"get_brand_kit","description":"Get brand-kit profiles. Optionally select one profile by ID; otherwise returns the complete store. Available from Dashboard.","inputSchema":{"type":"object","properties":{"brand_kit_id":{"type":"string"}},"required":[]}},
+        {"name":"apply_brand_kit","description":"Apply a saved brand kit's primary color to shape layers, its first font to text layers, and its first logo to image layers in the active project. Editor gate applies.","inputSchema":{"type":"object","properties":{"brand_kit_id":{"type":"string"}},"required":[]}},
+        {"name":"list_library","description":"List images in the user's Veltrax library. Available from Dashboard.","inputSchema":{"type":"object","properties":{},"required":[]}},
+        {"name":"list_fonts","description":"List imported .ttf and .otf fonts in the user's Veltrax font directory. Available from Dashboard.","inputSchema":{"type":"object","properties":{},"required":[]}}
+    ])).unwrap_or_default();
+    tools.extend(phase_g);
     json!({ "tools": tools })
 }
 
@@ -2481,10 +3054,22 @@ fn forward_tool_call(tool_name: &str, args: &Value) -> Value {
         return json!({ "content": [{ "type": "text", "text": detail }], "isError": true });
     }
 
+    if let Some(result) = resp.get("result") {
+        let text = serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string());
+        return json!({ "content": [{ "type": "text", "text": text }] });
+    }
+
     let cw = resp["canvas_width"].as_u64().unwrap_or(0);
     let ch = resp["canvas_height"].as_u64().unwrap_or(0);
     let layers = serde_json::to_string_pretty(&resp["layers"]).unwrap_or_else(|_| "[]".into());
-    let summary = format!("Canvas: {} × {} px\nLayers:\n{}", cw, ch, layers);
+    let metadata = resp.get("project").cloned().unwrap_or(Value::Null);
+    let summary = format!(
+        "Project properties: {}\nCanvas: {} × {} px\nLayers:\n{}",
+        serde_json::to_string_pretty(&metadata).unwrap_or_default(),
+        cw,
+        ch,
+        layers
+    );
 
     let mut content = vec![json!({ "type": "text", "text": summary })];
     if let Some(b64) = resp["image_base64"].as_str() {
@@ -2495,4 +3080,44 @@ fn forward_tool_call(tool_name: &str, args: &Value) -> Value {
 
 fn mcp_err(msg: &str) -> Value {
     json!({ "content": [{ "type": "text", "text": format!("Error: {}", msg) }], "isError": true })
+}
+
+#[cfg(test)]
+mod phase_g_tests {
+    use super::*;
+
+    #[test]
+    fn phase_g_tools_are_published_once_with_typed_schemas() {
+        let tools = build_tools_description();
+        let listed = tools["tools"].as_array().expect("tools array");
+        let required = [
+            "create_project",
+            "export_image",
+            "save_project",
+            "list_projects",
+            "list_templates",
+            "create_from_template",
+            "save_as_template",
+            "batch_render",
+            "get_brand_kit",
+            "apply_brand_kit",
+            "list_library",
+            "list_fonts",
+        ];
+        for name in required {
+            let matches: Vec<_> = listed
+                .iter()
+                .filter(|tool| tool["name"].as_str() == Some(name))
+                .collect();
+            assert_eq!(matches.len(), 1, "expected one MCP entry for {name}");
+            assert_eq!(matches[0]["inputSchema"]["type"], "object");
+            assert!(matches[0]["description"]
+                .as_str()
+                .is_some_and(|d| !d.is_empty()));
+        }
+        assert!(listed.iter().any(|tool| tool["name"] == "inspect_project"));
+        assert!(listed
+            .iter()
+            .any(|tool| tool["name"] == "render_template_batch"));
+    }
 }

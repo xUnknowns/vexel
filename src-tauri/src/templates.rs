@@ -3,8 +3,8 @@ use crate::layers::{
     LayerEffects, LayerKind, LayerOutline, ProjectResponse, ProjectSnapshot, SharedProjectState,
 };
 use crate::storage::{
-    atomic_write_bytes, atomic_write_str, copy_asset_into_project, ensure_subdir,
-    now_unix_millis, record_recent_project, write_session_lock, CURRENT_SCHEMA_VERSION,
+    atomic_write_bytes, atomic_write_str, copy_asset_into_project, ensure_subdir, now_unix_millis,
+    record_recent_project, write_session_lock, CURRENT_SCHEMA_VERSION,
 };
 use crate::tools::render_and_respond;
 use base64::Engine;
@@ -206,18 +206,87 @@ pub fn builtin_templates() -> Vec<VTemplate> {
                     angle: 135.0,
                 }),
                 layers: vec![
-                    make_shape_layer("yt_accent", "Accent Card", "rectangle", 60, 80, 18, 560, [99, 102, 241, 255], 9),
-                    make_text_layer("yt_badge", "Badge", "{{tag}}", 110, 110, 34.0, [56, 189, 248, 255], true),
-                    make_text_layer("yt_title", "Headline", "{{title}}", 110, 185, 92.0, [255, 255, 255, 255], true),
-                    make_text_layer("yt_sub", "Subtitle", "{{subtitle}}", 110, 440, 42.0, [203, 213, 225, 255], false),
+                    make_shape_layer(
+                        "yt_accent",
+                        "Accent Card",
+                        "rectangle",
+                        60,
+                        80,
+                        18,
+                        560,
+                        [99, 102, 241, 255],
+                        9,
+                    ),
+                    make_text_layer(
+                        "yt_badge",
+                        "Badge",
+                        "{{tag}}",
+                        110,
+                        110,
+                        34.0,
+                        [56, 189, 248, 255],
+                        true,
+                    ),
+                    make_text_layer(
+                        "yt_title",
+                        "Headline",
+                        "{{title}}",
+                        110,
+                        185,
+                        92.0,
+                        [255, 255, 255, 255],
+                        true,
+                    ),
+                    make_text_layer(
+                        "yt_sub",
+                        "Subtitle",
+                        "{{subtitle}}",
+                        110,
+                        440,
+                        42.0,
+                        [203, 213, 225, 255],
+                        false,
+                    ),
                 ],
                 groups: Vec::new(),
             },
             fields: vec![
-                TemplateField { id: "f1".into(), label: "Tag / Badge".into(), kind: "text".into(), layer_id: "yt_badge".into(), variable_name: "tag".into(), default_value: "NEW VIDEO".into(), image_fit: "cover".into() },
-                TemplateField { id: "f2".into(), label: "Main Title".into(), kind: "text".into(), layer_id: "yt_title".into(), variable_name: "title".into(), default_value: "HOW TO BUILD\nFAST APPS".into(), image_fit: "cover".into() },
-                TemplateField { id: "f3".into(), label: "Subtitle".into(), kind: "text".into(), layer_id: "yt_sub".into(), variable_name: "subtitle".into(), default_value: "Step-by-step tutorial".into(), image_fit: "cover".into() },
-                TemplateField { id: "f4".into(), label: "Accent Color".into(), kind: "color".into(), layer_id: "yt_accent".into(), variable_name: "accent".into(), default_value: "#6366F1".into(), image_fit: "cover".into() },
+                TemplateField {
+                    id: "f1".into(),
+                    label: "Tag / Badge".into(),
+                    kind: "text".into(),
+                    layer_id: "yt_badge".into(),
+                    variable_name: "tag".into(),
+                    default_value: "NEW VIDEO".into(),
+                    image_fit: "cover".into(),
+                },
+                TemplateField {
+                    id: "f2".into(),
+                    label: "Main Title".into(),
+                    kind: "text".into(),
+                    layer_id: "yt_title".into(),
+                    variable_name: "title".into(),
+                    default_value: "HOW TO BUILD\nFAST APPS".into(),
+                    image_fit: "cover".into(),
+                },
+                TemplateField {
+                    id: "f3".into(),
+                    label: "Subtitle".into(),
+                    kind: "text".into(),
+                    layer_id: "yt_sub".into(),
+                    variable_name: "subtitle".into(),
+                    default_value: "Step-by-step tutorial".into(),
+                    image_fit: "cover".into(),
+                },
+                TemplateField {
+                    id: "f4".into(),
+                    label: "Accent Color".into(),
+                    kind: "color".into(),
+                    layer_id: "yt_accent".into(),
+                    variable_name: "accent".into(),
+                    default_value: "#6366F1".into(),
+                    image_fit: "cover".into(),
+                },
             ],
             embedded_assets: HashMap::new(),
         },
@@ -242,16 +311,68 @@ pub fn builtin_templates() -> Vec<VTemplate> {
                     angle: 120.0,
                 }),
                 layers: vec![
-                    make_shape_layer("dc_box", "Card", "rectangle", 56, 56, 848, 428, [15, 23, 42, 200], 24),
-                    make_text_layer("dc_title", "Server Name", "{{server}}", 110, 150, 74.0, [255, 255, 255, 255], true),
-                    make_text_layer("dc_sub", "Tagline", "{{tagline}}", 110, 270, 34.0, [165, 180, 252, 255], false),
+                    make_shape_layer(
+                        "dc_box",
+                        "Card",
+                        "rectangle",
+                        56,
+                        56,
+                        848,
+                        428,
+                        [15, 23, 42, 200],
+                        24,
+                    ),
+                    make_text_layer(
+                        "dc_title",
+                        "Server Name",
+                        "{{server}}",
+                        110,
+                        150,
+                        74.0,
+                        [255, 255, 255, 255],
+                        true,
+                    ),
+                    make_text_layer(
+                        "dc_sub",
+                        "Tagline",
+                        "{{tagline}}",
+                        110,
+                        270,
+                        34.0,
+                        [165, 180, 252, 255],
+                        false,
+                    ),
                 ],
                 groups: Vec::new(),
             },
             fields: vec![
-                TemplateField { id: "f1".into(), label: "Server Name".into(), kind: "text".into(), layer_id: "dc_title".into(), variable_name: "server".into(), default_value: "CRAFTERS COMMUNITY".into(), image_fit: "cover".into() },
-                TemplateField { id: "f2".into(), label: "Tagline".into(), kind: "text".into(), layer_id: "dc_sub".into(), variable_name: "tagline".into(), default_value: "Creators · Developers · Artists".into(), image_fit: "cover".into() },
-                TemplateField { id: "f3".into(), label: "Card Color".into(), kind: "color".into(), layer_id: "dc_box".into(), variable_name: "card_color".into(), default_value: "#0F172A".into(), image_fit: "cover".into() },
+                TemplateField {
+                    id: "f1".into(),
+                    label: "Server Name".into(),
+                    kind: "text".into(),
+                    layer_id: "dc_title".into(),
+                    variable_name: "server".into(),
+                    default_value: "CRAFTERS COMMUNITY".into(),
+                    image_fit: "cover".into(),
+                },
+                TemplateField {
+                    id: "f2".into(),
+                    label: "Tagline".into(),
+                    kind: "text".into(),
+                    layer_id: "dc_sub".into(),
+                    variable_name: "tagline".into(),
+                    default_value: "Creators · Developers · Artists".into(),
+                    image_fit: "cover".into(),
+                },
+                TemplateField {
+                    id: "f3".into(),
+                    label: "Card Color".into(),
+                    kind: "color".into(),
+                    layer_id: "dc_box".into(),
+                    variable_name: "card_color".into(),
+                    default_value: "#0F172A".into(),
+                    image_fit: "cover".into(),
+                },
             ],
             embedded_assets: HashMap::new(),
         },
@@ -272,16 +393,68 @@ pub fn builtin_templates() -> Vec<VTemplate> {
                 bg_color: [0, 0, 0, 0],
                 bg_gradient: None,
                 layers: vec![
-                    make_shape_layer("lg_circle", "Emblem", "circle", 162, 112, 700, 700, [99, 102, 241, 255], 0),
-                    make_text_layer("lg_mono", "Monogram", "{{monogram}}", 340, 300, 260.0, [255, 255, 255, 255], true),
-                    make_text_layer("lg_name", "Brand Name", "{{brand}}", 240, 840, 72.0, [255, 255, 255, 255], true),
+                    make_shape_layer(
+                        "lg_circle",
+                        "Emblem",
+                        "circle",
+                        162,
+                        112,
+                        700,
+                        700,
+                        [99, 102, 241, 255],
+                        0,
+                    ),
+                    make_text_layer(
+                        "lg_mono",
+                        "Monogram",
+                        "{{monogram}}",
+                        340,
+                        300,
+                        260.0,
+                        [255, 255, 255, 255],
+                        true,
+                    ),
+                    make_text_layer(
+                        "lg_name",
+                        "Brand Name",
+                        "{{brand}}",
+                        240,
+                        840,
+                        72.0,
+                        [255, 255, 255, 255],
+                        true,
+                    ),
                 ],
                 groups: Vec::new(),
             },
             fields: vec![
-                TemplateField { id: "f1".into(), label: "Monogram".into(), kind: "text".into(), layer_id: "lg_mono".into(), variable_name: "monogram".into(), default_value: "V".into(), image_fit: "cover".into() },
-                TemplateField { id: "f2".into(), label: "Brand Name".into(), kind: "text".into(), layer_id: "lg_name".into(), variable_name: "brand".into(), default_value: "VELTRAX".into(), image_fit: "cover".into() },
-                TemplateField { id: "f3".into(), label: "Emblem Color".into(), kind: "color".into(), layer_id: "lg_circle".into(), variable_name: "emblem_color".into(), default_value: "#6366F1".into(), image_fit: "cover".into() },
+                TemplateField {
+                    id: "f1".into(),
+                    label: "Monogram".into(),
+                    kind: "text".into(),
+                    layer_id: "lg_mono".into(),
+                    variable_name: "monogram".into(),
+                    default_value: "V".into(),
+                    image_fit: "cover".into(),
+                },
+                TemplateField {
+                    id: "f2".into(),
+                    label: "Brand Name".into(),
+                    kind: "text".into(),
+                    layer_id: "lg_name".into(),
+                    variable_name: "brand".into(),
+                    default_value: "VELTRAX".into(),
+                    image_fit: "cover".into(),
+                },
+                TemplateField {
+                    id: "f3".into(),
+                    label: "Emblem Color".into(),
+                    kind: "color".into(),
+                    layer_id: "lg_circle".into(),
+                    variable_name: "emblem_color".into(),
+                    default_value: "#6366F1".into(),
+                    image_fit: "cover".into(),
+                },
             ],
             embedded_assets: HashMap::new(),
         },
@@ -306,16 +479,68 @@ pub fn builtin_templates() -> Vec<VTemplate> {
                     angle: 45.0,
                 }),
                 layers: vec![
-                    make_shape_layer("ig_card", "Card", "rectangle", 90, 90, 900, 900, [13, 13, 18, 235], 36),
-                    make_text_layer("ig_quote", "Quote", "{{quote}}", 160, 280, 68.0, [255, 255, 255, 255], true),
-                    make_text_layer("ig_handle", "Handle", "{{handle}}", 160, 820, 36.0, [165, 180, 252, 255], false),
+                    make_shape_layer(
+                        "ig_card",
+                        "Card",
+                        "rectangle",
+                        90,
+                        90,
+                        900,
+                        900,
+                        [13, 13, 18, 235],
+                        36,
+                    ),
+                    make_text_layer(
+                        "ig_quote",
+                        "Quote",
+                        "{{quote}}",
+                        160,
+                        280,
+                        68.0,
+                        [255, 255, 255, 255],
+                        true,
+                    ),
+                    make_text_layer(
+                        "ig_handle",
+                        "Handle",
+                        "{{handle}}",
+                        160,
+                        820,
+                        36.0,
+                        [165, 180, 252, 255],
+                        false,
+                    ),
                 ],
                 groups: Vec::new(),
             },
             fields: vec![
-                TemplateField { id: "f1".into(), label: "Headline / Quote".into(), kind: "text".into(), layer_id: "ig_quote".into(), variable_name: "quote".into(), default_value: "Design fast.\nShip faster.".into(), image_fit: "cover".into() },
-                TemplateField { id: "f2".into(), label: "Handle".into(), kind: "text".into(), layer_id: "ig_handle".into(), variable_name: "handle".into(), default_value: "@veltrax.studios".into(), image_fit: "cover".into() },
-                TemplateField { id: "f3".into(), label: "Card Color".into(), kind: "color".into(), layer_id: "ig_card".into(), variable_name: "card_color".into(), default_value: "#0D0D12".into(), image_fit: "cover".into() },
+                TemplateField {
+                    id: "f1".into(),
+                    label: "Headline / Quote".into(),
+                    kind: "text".into(),
+                    layer_id: "ig_quote".into(),
+                    variable_name: "quote".into(),
+                    default_value: "Design fast.\nShip faster.".into(),
+                    image_fit: "cover".into(),
+                },
+                TemplateField {
+                    id: "f2".into(),
+                    label: "Handle".into(),
+                    kind: "text".into(),
+                    layer_id: "ig_handle".into(),
+                    variable_name: "handle".into(),
+                    default_value: "@veltrax.studios".into(),
+                    image_fit: "cover".into(),
+                },
+                TemplateField {
+                    id: "f3".into(),
+                    label: "Card Color".into(),
+                    kind: "color".into(),
+                    layer_id: "ig_card".into(),
+                    variable_name: "card_color".into(),
+                    default_value: "#0D0D12".into(),
+                    image_fit: "cover".into(),
+                },
             ],
             embedded_assets: HashMap::new(),
         },
@@ -336,14 +561,49 @@ pub fn builtin_templates() -> Vec<VTemplate> {
                 bg_color: [0, 0, 0, 0],
                 bg_gradient: None,
                 layers: vec![
-                    make_shape_layer("tw_bg", "Panel BG", "rectangle", 8, 8, 304, 144, [145, 70, 255, 255], 20),
-                    make_text_layer("tw_title", "Panel Label", "{{label}}", 36, 48, 42.0, [255, 255, 255, 255], true),
+                    make_shape_layer(
+                        "tw_bg",
+                        "Panel BG",
+                        "rectangle",
+                        8,
+                        8,
+                        304,
+                        144,
+                        [145, 70, 255, 255],
+                        20,
+                    ),
+                    make_text_layer(
+                        "tw_title",
+                        "Panel Label",
+                        "{{label}}",
+                        36,
+                        48,
+                        42.0,
+                        [255, 255, 255, 255],
+                        true,
+                    ),
                 ],
                 groups: Vec::new(),
             },
             fields: vec![
-                TemplateField { id: "f1".into(), label: "Panel Label".into(), kind: "text".into(), layer_id: "tw_title".into(), variable_name: "label".into(), default_value: "ABOUT ME".into(), image_fit: "cover".into() },
-                TemplateField { id: "f2".into(), label: "Panel Color".into(), kind: "color".into(), layer_id: "tw_bg".into(), variable_name: "panel_color".into(), default_value: "#9146FF".into(), image_fit: "cover".into() },
+                TemplateField {
+                    id: "f1".into(),
+                    label: "Panel Label".into(),
+                    kind: "text".into(),
+                    layer_id: "tw_title".into(),
+                    variable_name: "label".into(),
+                    default_value: "ABOUT ME".into(),
+                    image_fit: "cover".into(),
+                },
+                TemplateField {
+                    id: "f2".into(),
+                    label: "Panel Color".into(),
+                    kind: "color".into(),
+                    layer_id: "tw_bg".into(),
+                    variable_name: "panel_color".into(),
+                    default_value: "#9146FF".into(),
+                    image_fit: "cover".into(),
+                },
             ],
             embedded_assets: HashMap::new(),
         },
@@ -393,6 +653,31 @@ pub fn load_all_vtemplates() -> Result<Vec<(VTemplate, String)>, String> {
     Ok(list)
 }
 
+pub fn resolve_vtemplate(template_ref: &str) -> Result<VTemplate, String> {
+    let candidate = Path::new(template_ref);
+    if candidate.is_file() {
+        if candidate.extension().and_then(|e| e.to_str()) != Some("vtemplate") {
+            return Err("Template file must use the .vtemplate extension.".to_string());
+        }
+        let raw = std::fs::read_to_string(candidate).map_err(|e| e.to_string())?;
+        return serde_json::from_str::<VTemplate>(&raw)
+            .map_err(|e| format!("Invalid template file: {}", e));
+    }
+
+    load_all_vtemplates()?
+        .into_iter()
+        .find(|(template, _)| {
+            template.id == template_ref || template.name.eq_ignore_ascii_case(template_ref)
+        })
+        .map(|(template, _)| template)
+        .ok_or_else(|| {
+            format!(
+                "Template '{}' not found. Use a template ID, name, or .vtemplate file path.",
+                template_ref
+            )
+        })
+}
+
 pub fn apply_fields_to_snapshot(
     tpl: &VTemplate,
     values: &HashMap<String, String>,
@@ -412,7 +697,8 @@ pub fn apply_fields_to_snapshot(
                 "text" => {
                     if let LayerKind::Text3D { content, .. } = &mut layer.kind {
                         if content.contains(&format!("{{{{{}}}}}", field.variable_name)) {
-                            *content = content.replace(&format!("{{{{{}}}}}", field.variable_name), &val);
+                            *content =
+                                content.replace(&format!("{{{{{}}}}}", field.variable_name), &val);
                         } else {
                             *content = val.clone();
                         }
@@ -465,7 +751,8 @@ pub fn apply_fields_to_snapshot(
                     let fallback = values
                         .get(&field.variable_name)
                         .unwrap_or(&field.default_value);
-                    *content = content.replace(&format!("{{{{{}}}}}", field.variable_name), fallback);
+                    *content =
+                        content.replace(&format!("{{{{{}}}}}", field.variable_name), fallback);
                 }
             }
         }
@@ -515,9 +802,8 @@ pub fn list_all_templates() -> Result<Vec<TemplateSummary>, String> {
     Ok(out)
 }
 
-#[tauri::command]
-pub fn save_current_as_vtemplate(
-    state: tauri::State<'_, SharedProjectState>,
+pub fn save_current_as_vtemplate_from_state(
+    state: &SharedProjectState,
     name: String,
     category: String,
     fields: Vec<TemplateField>,
@@ -563,7 +849,13 @@ pub fn save_current_as_vtemplate(
     let dir = ensure_subdir("templates")?;
     let safe: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let dest = dir.join(format!("{}_{}.vtemplate", safe, now_unix_millis()));
     let json = serde_json::to_string_pretty(&tpl).map_err(|e| e.to_string())?;
@@ -581,6 +873,16 @@ pub fn save_current_as_vtemplate(
         fields,
         preview_data_url,
     })
+}
+
+#[tauri::command]
+pub fn save_current_as_vtemplate(
+    state: tauri::State<'_, SharedProjectState>,
+    name: String,
+    category: String,
+    fields: Vec<TemplateField>,
+) -> Result<TemplateSummary, String> {
+    save_current_as_vtemplate_from_state(state.inner(), name, category, fields)
 }
 
 fn apply_brand_kit_to_snapshot(
@@ -608,14 +910,22 @@ fn apply_brand_kit_to_snapshot(
             }
             LayerKind::Shape { fill_color, .. } => {
                 // Apply primary brand color to color-editable shape fields
-                if tpl.fields.iter().any(|f| f.kind == "color" && f.layer_id == layer.id) {
+                if tpl
+                    .fields
+                    .iter()
+                    .any(|f| f.kind == "color" && f.layer_id == layer.id)
+                {
                     if let Some(hex) = primary_hex {
                         *fill_color = parse_hex_color(hex);
                     }
                 }
             }
             LayerKind::Image { source_path, .. } => {
-                if tpl.fields.iter().any(|f| f.kind == "image" && f.layer_id == layer.id) {
+                if tpl
+                    .fields
+                    .iter()
+                    .any(|f| f.kind == "image" && f.layer_id == layer.id)
+                {
                     if let Some(lp) = primary_logo {
                         if Path::new(lp).is_file() {
                             *source_path = lp.to_string();
@@ -645,9 +955,8 @@ pub fn preview_vtemplate_filled(
         .ok_or_else(|| "Failed to render template preview.".to_string())
 }
 
-#[tauri::command]
-pub fn create_project_from_vtemplate(
-    state: tauri::State<'_, SharedProjectState>,
+pub fn create_project_from_vtemplate_state(
+    state: &SharedProjectState,
     template_id: String,
     values: HashMap<String, String>,
     project_name: Option<String>,
@@ -691,7 +1000,13 @@ pub fn create_project_from_vtemplate(
     let slug: String = snap
         .project_name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let proj_path = proj_dir.join(format!("{}_{}.veltrax", slug.trim_matches('_'), pid));
     let json = serde_json::to_string_pretty(&snap).map_err(|e| e.to_string())?;
@@ -709,6 +1024,23 @@ pub fn create_project_from_vtemplate(
     let resp = render_and_respond(&mut s)?;
     let _ = record_recent_project(&proj_path.to_string_lossy(), &s.current, None);
     Ok(resp)
+}
+
+#[tauri::command]
+pub fn create_project_from_vtemplate(
+    state: tauri::State<'_, SharedProjectState>,
+    template_id: String,
+    values: HashMap<String, String>,
+    project_name: Option<String>,
+    brand_kit_id: Option<String>,
+) -> Result<ProjectResponse, String> {
+    create_project_from_vtemplate_state(
+        state.inner(),
+        template_id,
+        values,
+        project_name,
+        brand_kit_id,
+    )
 }
 
 #[tauri::command]

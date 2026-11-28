@@ -15,6 +15,7 @@
 
   let connectedClient = $derived(clients.find((c) => c.connected) ?? null);
   let hasConnectedLimit = $derived(Boolean(connectedClient));
+  let hasDetectedClient = $derived(clients.some((client) => client.installed || client.connected));
 
   const clientIcons = {
     claude: Bot,
@@ -146,6 +147,13 @@
     </div>
   {/if}
 
+  {#if !scanning && !hasDetectedClient}
+    <div class="empty-clients" role="status">
+      <strong>No se detectaron clientes MCP compatibles.</strong>
+      <span>Veltrax también se puede usar sin MCP. Para conectarlo manualmente, copia el comando o el bloque JSON de abajo en la configuración MCP de tu cliente y reinícialo.</span>
+    </div>
+  {/if}
+
   <div class="clients-list" class:grid={!compact}>
     {#each clients as client}
       {@const ClientIcon = clientIcons[client.id] ?? Bot}
@@ -271,6 +279,8 @@
 
   .clients-list { display:flex; flex-direction:column; gap:10px; }
   .clients-list.grid { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; }
+  .empty-clients { display:flex; flex-direction:column; gap:5px; padding:11px 12px; border:1px solid var(--border); border-radius:var(--r-md); background:var(--bg-elevated); color:var(--text-secondary); font-size:11px; line-height:1.45; }
+  .empty-clients strong { color:var(--text-primary); font-size:12px; }
   .client-card { background:var(--bg-elevated); border:1px solid var(--border); border-radius:var(--r-md); padding:12px; display:flex; flex-direction:column; gap:8px; }
   .client-card.is-connected { border-color:rgba(16,185,129,0.45); }
   .client-id-row { display:flex; align-items:center; gap:9px; }

@@ -6,23 +6,254 @@ mod brand;
 mod layers;
 mod mcp;
 mod storage;
+mod support;
 mod templates;
 mod tools;
 
+fn cli_usage() -> &'static str {
+    "Veltrax Studios headless usage:\n\
+     veltrax-studios.exe --render <template-id|name|.vtemplate> --out <file> [--vars <json>] [--format png|jpeg|webp] [--quality 1-100] [--size WIDTHxHEIGHT]\n\
+     veltrax-studios.exe --batch <template-id|name|.vtemplate> --data <csv|json> --out <folder> [--pattern <name-pattern>] [--format png|jpeg|webp] [--quality 1-100]\n\
+     veltrax-studios.exe --mcp  (MCP stdio server)"
+}
+
+fn parse_cli_options(args: &[String]) -> Result<std::collections::HashMap<String, String>, String> {
+    let mut options = std::collections::HashMap::new();
+    let mut index = 0;
+    while index < args.len() {
+        let flag = &args[index];
+        if !flag.starts_with("--") {
+            return Err(format!("Unexpected argument '{}'.\n{}", flag, cli_usage()));
+        }
+        let value = args
+            .get(index + 1)
+            .filter(|value| !value.starts_with("--"))
+            .ok_or_else(|| format!("Missing value for '{}'.\n{}", flag, cli_usage()))?;
+        if options.insert(flag.clone(), value.clone()).is_some() {
+            return Err(format!("Option '{}' was provided more than once.", flag));
+        }
+        index += 2;
+    }
+    Ok(options)
+}
+
+fn required_option<'a>(
+    options: &'a std::collections::HashMap<String, String>,
+    name: &str,
+) -> Result<&'a str, String> {
+    options
+        .get(name)
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("Missing required option '{}'.\n{}", name, cli_usage()))
+}
+
+fn parse_cli_size(raw: &str) -> Result<(u32, u32), String> {
+    let (width, height) = raw
+        .split_once('x')
+        .or_else(|| raw.split_once('X'))
+        .ok_or_else(|| "Size must be written WIDTHxHEIGHT, e.g. 1280x720.".to_string())?;
+    let width = width
+        .parse::<u32>()
+        .map_err(|_| "Invalid width in --size.".to_string())?;
+    let height = height
+        .parse::<u32>()
+        .map_err(|_| "Invalid height in --size.".to_string())?;
+    if width == 0
+        || height == 0
+        || width > 16_384
+        || height > 16_384
+        || (width as u64) * (height as u64) > 100_000_000
+    {
+        return Err("Size must be between 1 and 16384 px per side and at most 100 MP.".to_string());
+    }
+    Ok((width, height))
+}
+
+fn load_cli_values(
+    path: Option<&String>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let Some(path) = path else {
+        return Ok(std::collections::HashMap::new());
+    };
+    let raw =
+        std::fs::read_to_string(path).map_err(|e| format!("Could not read vars JSON: {}", e))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("Invalid vars JSON: {}", e))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "Vars JSON must be an object with variable names as keys.".to_string())?;
+    Ok(object
+        .iter()
+        .map(|(key, value)| {
+            let text = match value {
+                serde_json::Value::String(text) => text.clone(),
+                serde_json::Value::Null => String::new(),
+                other => other.to_string(),
+            };
+            (key.clone(), text)
+        })
+        .collect())
+}
+
+fn cli_format(options: &std::collections::HashMap<String, String>, out: &str) -> String {
+    options
+        .get("--format")
+        .cloned()
+        .or_else(|| {
+            std::path::Path::new(out)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "png".to_string())
+}
+
+fn run_headless_cli(args: &[String]) -> Result<(), String> {
+    if args.first().map(String::as_str) == Some("--help")
+        || args.first().map(String::as_str) == Some("-h")
+    {
+        println!("{}", cli_usage());
+        return Ok(());
+    }
+    let action = args
+        .first()
+        .map(String::as_str)
+        .ok_or_else(|| cli_usage().to_string())?;
+    let template_ref = args
+        .get(1)
+        .filter(|value| !value.starts_with("--"))
+        .ok_or_else(|| format!("Missing template after '{}'.\n{}", action, cli_usage()))?;
+    let options = parse_cli_options(&args[2..])?;
+    let out = required_option(&options, "--out")?;
+    let quality = options
+        .get("--quality")
+        .map(|value| {
+            value
+                .parse::<u8>()
+                .map_err(|_| "--quality must be an integer from 1 to 100.".to_string())
+        })
+        .transpose()?
+        .unwrap_or(90);
+    if !(1..=100).contains(&quality) {
+        return Err("--quality must be from 1 to 100.".to_string());
+    }
+
+    match action {
+        "--render" => {
+            if let Some(unknown) = options.keys().find(|key| {
+                !["--out", "--vars", "--format", "--quality", "--size"].contains(&key.as_str())
+            }) {
+                return Err(format!("Unknown option '{}' for --render.", unknown));
+            }
+            let vars = load_cli_values(options.get("--vars"))?;
+            let size = options
+                .get("--size")
+                .map(|value| parse_cli_size(value))
+                .transpose()?;
+            let format = cli_format(&options, out);
+            let output = std::path::Path::new(out);
+            if let Some(parent) = output
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            batch::cli_render_template(template_ref, &vars, output, &format, quality, size)?;
+            println!("Rendered image: {}", output.display());
+            Ok(())
+        }
+        "--batch" => {
+            if let Some(unknown) = options.keys().find(|key| {
+                !["--out", "--data", "--pattern", "--format", "--quality"].contains(&key.as_str())
+            }) {
+                return Err(format!("Unknown option '{}' for --batch.", unknown));
+            }
+            let data_path = required_option(&options, "--data")?;
+            let raw = std::fs::read_to_string(data_path)
+                .map_err(|e| format!("Could not read batch data: {}", e))?;
+            let rows = batch::parse_batch_rows(&raw)?;
+            let format = cli_format(&options, "output.png");
+            let pattern = options
+                .get("--pattern")
+                .map(String::as_str)
+                .unwrap_or("{index}");
+            let summary = batch::cli_batch_render(
+                template_ref,
+                &rows,
+                std::path::Path::new(out),
+                pattern,
+                &format,
+                quality,
+            )?;
+            for path in &summary.saved {
+                println!("Saved: {}", path);
+            }
+            for error in &summary.errors {
+                eprintln!("Error: {}", error);
+            }
+            if !summary.errors.is_empty() {
+                return Err(format!(
+                    "Batch completed with {} error(s).",
+                    summary.errors.len()
+                ));
+            }
+            println!("Batch complete: {} image(s).", summary.saved.len());
+            Ok(())
+        }
+        _ => Err(format!(
+            "Unknown headless option '{}'.\n{}",
+            action,
+            cli_usage()
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn attach_parent_console() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+    }
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_parent_console() {}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let project_state: layers::SharedProjectState =
+        std::sync::Arc::new(std::sync::Mutex::new(layers::ProjectState::default()));
+    support::install_global_panic_hook(project_state.clone());
+    support::append_app_log(
+        "INFO",
+        &format!("Veltrax Studios {} started.", env!("CARGO_PKG_VERSION")),
+    );
     if args.get(1).map(|s| s.as_str()) == Some("--mcp") {
         mcp::run_mcp_stdio();
         return;
     }
+    if args.get(1).map(|s| s.starts_with("--")).unwrap_or(false) {
+        attach_parent_console();
+        match run_headless_cli(&args[1..]) {
+            Ok(()) => std::process::exit(0),
+            Err(error) => {
+                eprintln!("{}", error);
+                std::process::exit(1);
+            }
+        }
+    }
 
-    let project_state: layers::SharedProjectState =
-        std::sync::Arc::new(std::sync::Mutex::new(layers::ProjectState::default()));
     let state_for_server = project_state.clone();
     let state_for_close = project_state.clone();
 
     tauri::Builder::default()
         .manage(project_state)
+        // Updater extension point: register tauri-plugin-updater here after configuring its feed and signing keys.
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(move |_window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
@@ -31,13 +262,15 @@ fn main() {
                     if s.has_project {
                         if let Ok(dir) = storage::ensure_subdir("autosave") {
                             if let Ok(json) = serde_json::to_string(&s.current) {
-                                let _ = storage::atomic_write_str(&dir.join("autosave.veltrax"), &json);
+                                let _ =
+                                    storage::atomic_write_str(&dir.join("autosave.veltrax"), &json);
                             }
                         }
                         if let Some(ref p) = s.project_file_path {
                             if s.dirty {
                                 if let Ok(json) = serde_json::to_string_pretty(&s.current) {
-                                    let _ = storage::atomic_write_str(std::path::Path::new(p), &json);
+                                    let _ =
+                                        storage::atomic_write_str(std::path::Path::new(p), &json);
                                 }
                             }
                         }
@@ -75,6 +308,10 @@ fn main() {
             tools::clear_autosave,
             storage::get_app_settings,
             storage::save_app_settings,
+            support::get_app_version,
+            support::get_feedback_diagnostics,
+            support::open_feedback_site,
+            support::record_local_error,
             storage::get_recent_projects,
             storage::remove_recent_project,
             storage::relink_recent_project,

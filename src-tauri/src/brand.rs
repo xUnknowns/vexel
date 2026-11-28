@@ -33,10 +33,22 @@ impl Default for BrandKitProfile {
             id: "default".to_string(),
             name: "Default Brand".to_string(),
             colors: vec![
-                BrandColor { name: "Primary".into(), hex: "#6366F1".into() },
-                BrandColor { name: "Accent".into(), hex: "#38BDF8".into() },
-                BrandColor { name: "Highlight".into(), hex: "#EC4899".into() },
-                BrandColor { name: "Dark".into(), hex: "#0F172A".into() },
+                BrandColor {
+                    name: "Primary".into(),
+                    hex: "#6366F1".into(),
+                },
+                BrandColor {
+                    name: "Accent".into(),
+                    hex: "#38BDF8".into(),
+                },
+                BrandColor {
+                    name: "Highlight".into(),
+                    hex: "#EC4899".into(),
+                },
+                BrandColor {
+                    name: "Dark".into(),
+                    hex: "#0F172A".into(),
+                },
             ],
             fonts: vec!["bold_display".into(), "modern_sans".into()],
             logos: Vec::new(),
