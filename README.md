@@ -12,7 +12,7 @@
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri)](https://tauri.app)
 [![Svelte 5](https://img.shields.io/badge/Svelte-5-FF3E00?logo=svelte)](https://svelte.dev)
 [![Rust](https://img.shields.io/badge/Rust-CE4A07?logo=rust)](https://rust-lang.org)
-[![CI](https://img.shields.io/badge/CI-CircleCI-343434?logo=circleci)](https://circleci.com)
+[![CI](https://img.shields.io/badge/CI-GitHub_Actions-2088FF?logo=githubactions)](.github/workflows/main.yml)
 
 </div>
 
@@ -70,13 +70,13 @@ Human intent → Claude AI (MCP) → Rust image engine → Pixel-perfect result
 | Frontend | Svelte 5 + Vite 6 |
 | Image engine | Rust — `image` v0.25, Lanczos3, non-destructive temp files |
 | AI bridge | Model Context Protocol (MCP) — Claude Desktop integration |
-| CI/CD | CircleCI `win/default` executor → `.exe` artifact |
+| CI/CD | GitHub Actions `windows-latest` → instalador NSIS de la versión actual |
 
 ---
 
 ## Development
 
-> **Note:** Rust compilation (`cargo build` / `npm run tauri build`) runs in CircleCI. Don't compile locally on a low-resource machine — push to `main` and let the pipeline produce the `.exe` for you.
+> **Note:** Rust compilation (`cargo build` / `npm run tauri build`) runs in GitHub Actions. Push to `main` and download the Windows installer from the workflow artifact.
 
 ```bash
 # Install JS dependencies (first time)
@@ -117,12 +117,14 @@ The Editor gate remains in effect for layer edits, `inspect_project`, `save_proj
 ---
 ## CI/CD
 
-Every push to `main` triggers a CircleCI Windows pipeline that:
+Every push to `main` triggers the GitHub Actions Windows workflow that:
 
 1. Installs Node.js LTS + Rust stable
-2. Caches the Cargo registry
-3. Runs `npm run tauri build`
-4. Stores the installer bundle under **Artifacts → `veltrax-studios-windows-bundle`**
+2. Caches the Cargo registry/build
+3. Removes the cached NSIS bundle directory before `npm run tauri build`, so previous-version installers cannot leak into the new artifact
+4. Verifies and uploads only `Veltrax Studios_1.0.0_x64-setup.exe` under **Artifacts → `Veltrax-Studios-1.0-Windows-Setup`**
+
+The native window is visible immediately instead of waiting for frontend startup code to show it. If startup checks take more than 10 seconds, the splash lets the dashboard open with a warning while those checks finish; the splash animation itself remains unchanged. This is a recovery path, not proof that every Windows startup failure is fixed, so test the newly built installer on Windows.
 
 ---
 
@@ -130,7 +132,7 @@ Every push to `main` triggers a CircleCI Windows pipeline that:
 
 ```
 Veltrax-Studios/
-├── .circleci/config.yml              CircleCI Windows pipeline
+├── .github/workflows/main.yml        GitHub Actions Windows installer pipeline
 ├── src/
 │   ├── App.svelte                    Full UI — Dashboard / Editor / MCP view
 │   ├── app.css                       Design tokens (dark studio theme)

@@ -73,8 +73,19 @@
   }
 
   async function bootApp() {
-    // Show main window once WebView has painted #0d0d12 background
-    getCurrentWindow().show().catch(() => {});
+    const startupFallback = setTimeout(() => {
+      if (!appReady) {
+        startupWarning ||= 'El inicio está tardando más de lo esperado. La interfaz se abrirá mientras terminan las comprobaciones.';
+        splashStatus = 'Opening workspace…';
+        splashProgress = 100;
+        appReady = true;
+      }
+    }, 10000);
+
+    // The native window is visible by default; this call is retained as a best-effort show.
+    try {
+      getCurrentWindow().show().catch(() => {});
+    } catch {}
 
     splashStatus = 'Loading settings…';
     splashProgress = 25;
@@ -105,13 +116,19 @@
     splashStatus = 'Ready';
     splashProgress = 100;
     appReady = true;
+    clearTimeout(startupFallback);
     invoke('scan_desktop_ai_clients').catch(() => {});
   }
 
   $effect(() => {
     if (!didBoot) {
       didBoot = true;
-      bootApp();
+      bootApp().catch((e) => {
+        startupWarning = `No se pudo completar la inicialización: ${e}`;
+        splashProgress = 100;
+        splashStatus = 'Opening workspace…';
+        appReady = true;
+      });
     }
   });
 
