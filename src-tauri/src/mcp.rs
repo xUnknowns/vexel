@@ -1,6 +1,6 @@
 use crate::layers::{
-    parse_hex_color, BgGradient, Layer, LayerEffects, LayerGroup, LayerKind, LayerOutline,
-    SharedProjectState,
+    parse_hex_color, BgGradient, DropShadow, GlowEffect, Layer, LayerEffects, LayerGroup,
+    LayerKind, LayerOutline, SharedProjectState,
 };
 use crate::tools::{internal_get_preview_base64, render_and_respond};
 use serde_json::{json, Value};
@@ -1105,6 +1105,204 @@ fn execute_mcp_layer_tool(
             }
             render_and_respond(s)
         }
+        "add_drop_shadow" => {
+            let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
+            let enabled = p["enabled"].as_bool().unwrap_or(true);
+            s.push_undo();
+            let layer = s
+                .current
+                .layers
+                .iter_mut()
+                .find(|l| l.id == lid)
+                .ok_or_else(|| format!("Layer '{}' not found.", lid))?;
+            layer.shadow.enabled = enabled;
+            if let Some(c) = p["color_hex"].as_str() {
+                layer.shadow.color = parse_hex_color(c);
+            }
+            if let Some(v) = p["blur"].as_u64() {
+                layer.shadow.blur = v as u32;
+            }
+            if let Some(v) = p["distance"].as_u64() {
+                layer.shadow.distance = v as u32;
+            }
+            if let Some(v) = p["angle"].as_f64() {
+                layer.shadow.angle = v as f32;
+            }
+            if let Some(v) = p["opacity"].as_u64() {
+                layer.shadow.opacity = v.min(100) as u8;
+            }
+            render_and_respond(s)
+        }
+        "add_glow" => {
+            let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
+            let kind = p["kind"].as_str().unwrap_or("outer");
+            let enabled = p["enabled"].as_bool().unwrap_or(true);
+            s.push_undo();
+            let layer = s
+                .current
+                .layers
+                .iter_mut()
+                .find(|l| l.id == lid)
+                .ok_or_else(|| format!("Layer '{}' not found.", lid))?;
+            let glow = if kind == "inner" {
+                &mut layer.inner_glow
+            } else {
+                &mut layer.outer_glow
+            };
+            glow.enabled = enabled;
+            if let Some(c) = p["color_hex"].as_str() {
+                glow.color = parse_hex_color(c);
+            }
+            if let Some(v) = p["intensity"].as_u64() {
+                glow.intensity = (v as u32).clamp(1, 60);
+            }
+            render_and_respond(s)
+        }
+        "set_layer_mask" => {
+            let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
+            s.push_undo();
+            let layer = s
+                .current
+                .layers
+                .iter_mut()
+                .find(|l| l.id == lid)
+                .ok_or_else(|| format!("Layer '{}' not found.", lid))?;
+            layer.mask_shape = p["mask_shape"]
+                .as_str()
+                .filter(|m| !m.is_empty() && *m != "none")
+                .map(|m| m.to_string());
+            if let Some(r) = p["mask_radius"].as_u64() {
+                layer.mask_radius = r as u32;
+            }
+            if let Some(clip) = p["clip_to_below"].as_bool() {
+                layer.clip_to_below = clip;
+            }
+            render_and_respond(s)
+        }
+        "update_text_advanced" => {
+            let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
+            s.push_undo();
+            let layer = s
+                .current
+                .layers
+                .iter_mut()
+                .find(|l| l.id == lid)
+                .ok_or_else(|| format!("Layer '{}' not found.", lid))?;
+            match &mut layer.kind {
+                LayerKind::Text3D {
+                    underline,
+                    gradient_colors,
+                    gradient_angle,
+                    curve_amount,
+                    ..
+                } => {
+                    if let Some(u) = p["underline"].as_bool() {
+                        *underline = u;
+                    }
+                    if let Some(ca) = p["curve_amount"].as_f64() {
+                        *curve_amount = (ca as f32).clamp(-180.0, 180.0);
+                    }
+                    if let Some(ga) = p["gradient_angle"].as_f64() {
+                        *gradient_angle = ga as f32;
+                    }
+                    if p["clear_gradient"].as_bool() == Some(true) {
+                        *gradient_colors = None;
+                    } else if p["gradient_from_hex"].is_string() || p["gradient_to_hex"].is_string() {
+                        let cur = gradient_colors.unwrap_or([[255, 255, 255, 255], [56, 189, 248, 255]]);
+                        let from = p["gradient_from_hex"]
+                            .as_str()
+                            .map(parse_hex_color)
+                            .unwrap_or(cur[0]);
+                        let to = p["gradient_to_hex"]
+                            .as_str()
+                            .map(parse_hex_color)
+                            .unwrap_or(cur[1]);
+                        *gradient_colors = Some([from, to]);
+                    }
+                }
+                _ => return Err("Selected layer is not a Text layer.".to_string()),
+            }
+            render_and_respond(s)
+        }
+        "add_shape_advanced" => {
+            let shape_type = p["shape_type"].as_str().unwrap_or("star").to_string();
+            let width = p["width"].as_u64().unwrap_or(240).max(4) as u32;
+            let height = p["height"].as_u64().unwrap_or(240).max(4) as u32;
+            let fill_color = parse_hex_color(p["fill_hex"].as_str().unwrap_or("#6366F1"));
+            let border_radius = p["border_radius"].as_u64().unwrap_or(0) as u32;
+            let border_color = p["border_hex"]
+                .as_str()
+                .map(parse_hex_color)
+                .unwrap_or([255, 255, 255, 255]);
+            let border_width = p["border_width"].as_u64().unwrap_or(0) as u32;
+            let sides = p["sides"].as_u64().unwrap_or(5).clamp(3, 12) as u32;
+            let fill_gradient = match (
+                p["fill_gradient_from"].as_str(),
+                p["fill_gradient_to"].as_str(),
+            ) {
+                (Some(a), Some(b)) => Some(BgGradient {
+                    from: parse_hex_color(a),
+                    to: parse_hex_color(b),
+                    angle: p["fill_gradient_angle"].as_f64().unwrap_or(45.0) as f32,
+                }),
+                _ => None,
+            };
+            s.push_undo();
+            let cw = s.current.canvas_width as i64;
+            let ch = s.current.canvas_height as i64;
+            let lx = p["x"].as_i64().unwrap_or((cw - width as i64) / 2);
+            let ly = p["y"].as_i64().unwrap_or((ch - height as i64) / 2);
+            let id = format!(
+                "layer_{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            );
+            s.current.layers.push(Layer {
+                id,
+                name: shape_type.clone(),
+                visible: true,
+                locked: false,
+                x: lx,
+                y: ly,
+                scale: 1.0,
+                rotation: 0.0,
+                opacity: 1.0,
+                blend_mode: "normal".into(),
+                flip_h: false,
+                flip_v: false,
+                bounds_width: width,
+                bounds_height: height,
+                effects: LayerEffects::default(),
+                outline: LayerOutline::default(),
+                group_id: None,
+                shadow: DropShadow::default(),
+                outer_glow: GlowEffect::default(),
+                inner_glow: GlowEffect::default(),
+                clip_to_below: false,
+                mask_shape: None,
+                mask_radius: 0,
+                kind: LayerKind::Shape {
+                    shape_type,
+                    width,
+                    height,
+                    fill_color,
+                    border_radius,
+                    border_color,
+                    border_width,
+                    sides,
+                    corner_radii: None,
+                    fill_gradient,
+                },
+            });
+            render_and_respond(s)
+        }
+        "import_font" => {
+            let source_path = p["source_path"].as_str().ok_or("Missing 'source_path'")?;
+            let _ = crate::tools::import_font(source_path.to_string())?;
+            Ok(s.to_response())
+        }
         other => Err(format!("Unknown MCP tool '{}'", other)),
     }
 }
@@ -1464,6 +1662,101 @@ fn build_tools_description() -> Value {
                         "alignment": { "type": "string", "enum": ["left","center","right","top","middle","bottom"] }
                     },
                     "required": ["layer_ids", "alignment"]
+                }
+            },
+            {
+                "name": "add_drop_shadow",
+                "description": "Enable or configure drop shadow on any layer.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "layer_id": { "type": "string" },
+                        "enabled": { "type": "boolean" },
+                        "color_hex": { "type": "string" },
+                        "blur": { "type": "integer", "minimum": 0, "maximum": 40 },
+                        "distance": { "type": "integer", "minimum": 0, "maximum": 100 },
+                        "angle": { "type": "number" },
+                        "opacity": { "type": "integer", "minimum": 0, "maximum": 100 }
+                    },
+                    "required": ["layer_id", "enabled"]
+                }
+            },
+            {
+                "name": "add_glow",
+                "description": "Enable or configure outer or inner glow on any layer.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "layer_id": { "type": "string" },
+                        "kind": { "type": "string", "enum": ["outer", "inner"] },
+                        "enabled": { "type": "boolean" },
+                        "color_hex": { "type": "string" },
+                        "intensity": { "type": "integer", "minimum": 1, "maximum": 60 }
+                    },
+                    "required": ["layer_id", "kind", "enabled"]
+                }
+            },
+            {
+                "name": "set_layer_mask",
+                "description": "Apply a shape mask (none, circle, rounded, star) or clip_to_below on a layer.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "layer_id": { "type": "string" },
+                        "mask_shape": { "type": "string", "enum": ["none", "circle", "rounded", "star"] },
+                        "mask_radius": { "type": "integer", "minimum": 0 },
+                        "clip_to_below": { "type": "boolean" }
+                    },
+                    "required": ["layer_id"]
+                }
+            },
+            {
+                "name": "update_text_advanced",
+                "description": "Configure underline, gradient fill, or arc curve on a Text3D layer.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "layer_id": { "type": "string" },
+                        "underline": { "type": "boolean" },
+                        "gradient_from_hex": { "type": "string" },
+                        "gradient_to_hex": { "type": "string" },
+                        "gradient_angle": { "type": "number" },
+                        "clear_gradient": { "type": "boolean" },
+                        "curve_amount": { "type": "number", "minimum": -180, "maximum": 180 }
+                    },
+                    "required": ["layer_id"]
+                }
+            },
+            {
+                "name": "add_shape_advanced",
+                "description": "Add a shape layer (line, arrow, triangle, star, polygon, rectangle, circle, badge) with optional gradient fill.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "shape_type": { "type": "string", "enum": ["line","arrow","triangle","star","polygon","rectangle","circle","badge"] },
+                        "width": { "type": "integer", "minimum": 4 },
+                        "height": { "type": "integer", "minimum": 4 },
+                        "fill_hex": { "type": "string" },
+                        "border_radius": { "type": "integer", "minimum": 0 },
+                        "border_hex": { "type": "string" },
+                        "border_width": { "type": "integer", "minimum": 0 },
+                        "sides": { "type": "integer", "minimum": 3, "maximum": 12 },
+                        "fill_gradient_from": { "type": "string" },
+                        "fill_gradient_to": { "type": "string" },
+                        "fill_gradient_angle": { "type": "number" },
+                        "x": { "type": "integer" },
+                        "y": { "type": "integer" }
+                    },
+                    "required": ["shape_type", "width", "height", "fill_hex"]
+                }
+            },
+            {
+                "name": "import_font",
+                "description": "Import a custom .ttf or .otf font file from disk into Veltrax Studios.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "source_path": { "type": "string" } },
+                    "required": ["source_path"]
                 }
             },
             {

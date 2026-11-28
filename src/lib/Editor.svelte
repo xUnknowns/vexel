@@ -234,6 +234,46 @@
       : textPresets
   );
 
+  let importedFonts = $state([]);
+  let allFontStyles = $derived([
+    ...fontStyles,
+    ...importedFonts.map((f) => ({ id: f, label: f.replace(/\.(ttf|otf)$/i, '') })),
+  ]);
+
+  async function loadImportedFonts() {
+    try {
+      importedFonts = await invoke('list_imported_fonts');
+    } catch (e) {
+      console.error('loadImportedFonts:', e);
+    }
+  }
+
+  async function importCustomFont() {
+    const sel = await open({
+      multiple: false,
+      title: 'Import Font (.ttf / .otf)',
+      filters: [{ name: 'Fonts', extensions: ['ttf', 'otf'] }],
+    });
+    if (typeof sel === 'string' && sel) {
+      try {
+        const fname = await invoke('import_font', { sourcePath: sel });
+        await loadImportedFonts();
+        fontStyle = fname;
+      } catch (e) {
+        errorMsg = String(e);
+      }
+    }
+  }
+
+  async function deleteCustomFont(filename) {
+    try {
+      await invoke('delete_imported_font', { filename });
+      await loadImportedFonts();
+    } catch (e) {
+      errorMsg = String(e);
+    }
+  }
+
   async function loadUserLibrary() {
     try {
       userLibrary = await invoke('get_user_library');
@@ -244,6 +284,7 @@
 
   $effect(() => {
     loadUserLibrary();
+    loadImportedFonts();
   });
 
   async function uploadAndSaveElement() {
@@ -435,6 +476,12 @@
           borderRadius: Number(patch.border_radius ?? k.border_radius),
           borderHex: patch.border_hex ?? rgbaToHex(k.border_color ?? [255, 255, 255, 255]),
           borderWidth: Number(patch.border_width ?? k.border_width ?? 0),
+          sides: patch.sides !== undefined ? Number(patch.sides) : null,
+          cornerRadii: patch.corner_radii ?? null,
+          fillGradientFrom: patch.fill_gradient_from ?? null,
+          fillGradientTo: patch.fill_gradient_to ?? null,
+          fillGradientAngle: patch.fill_gradient_angle !== undefined ? Number(patch.fill_gradient_angle) : null,
+          clearFillGradient: patch.clear_fill_gradient ?? null,
           recordUndo,
         });
         onProjectUpdate(resp);
@@ -442,6 +489,115 @@
         errorMsg = String(e);
       }
     }, recordUndo);
+  }
+
+  function liveUpdateTextAdvanced(patch, recordUndo = false) {
+    if (!selectedLayer || selectedLayer.kind?.type !== 'Text3D') return;
+    const l = selectedLayer;
+    if (patch.gradient_from_hex) trackRecentColor(patch.gradient_from_hex);
+    if (patch.gradient_to_hex) trackRecentColor(patch.gradient_to_hex);
+    scheduleLive(async () => {
+      try {
+        const resp = await invoke('update_text_advanced', {
+          layerId: l.id,
+          underline: patch.underline ?? null,
+          gradientFromHex: patch.clear ? null : (patch.gradient_from_hex ?? null),
+          gradientToHex: patch.clear ? null : (patch.gradient_to_hex ?? null),
+          gradientAngle: patch.gradient_angle !== undefined ? Number(patch.gradient_angle) : null,
+          curveAmount: patch.curve_amount !== undefined ? Number(patch.curve_amount) : null,
+          recordUndo,
+        });
+        onProjectUpdate(resp);
+      } catch (e) {
+        errorMsg = String(e);
+      }
+    }, recordUndo);
+  }
+
+  function liveUpdateShadow(patch, recordUndo = false) {
+    if (!selectedLayer) return;
+    const l = selectedLayer;
+    const sh = l.shadow ?? {};
+    if (patch.color_hex) trackRecentColor(patch.color_hex);
+    scheduleLive(async () => {
+      try {
+        const resp = await invoke('update_layer_shadow', {
+          layerId: l.id,
+          enabled: patch.enabled ?? sh.enabled ?? false,
+          colorHex: patch.color_hex ?? rgbaToHex(sh.color ?? [0, 0, 0, 255]),
+          blur: patch.blur !== undefined ? Number(patch.blur) : null,
+          distance: patch.distance !== undefined ? Number(patch.distance) : null,
+          angle: patch.angle !== undefined ? Number(patch.angle) : null,
+          opacity: patch.opacity !== undefined ? Number(patch.opacity) : null,
+          recordUndo,
+        });
+        onProjectUpdate(resp);
+      } catch (e) {
+        errorMsg = String(e);
+      }
+    }, recordUndo);
+  }
+
+  function liveUpdateGlow(patch, recordUndo = false) {
+    if (!selectedLayer) return;
+    const l = selectedLayer;
+    const kind = patch.kind ?? 'outer';
+    const g = (kind === 'inner' ? l.inner_glow : l.outer_glow) ?? {};
+    if (patch.color_hex) trackRecentColor(patch.color_hex);
+    scheduleLive(async () => {
+      try {
+        const resp = await invoke('update_layer_glow', {
+          layerId: l.id,
+          kind,
+          enabled: patch.enabled ?? g.enabled ?? false,
+          colorHex: patch.color_hex ?? null,
+          intensity: patch.intensity !== undefined ? Number(patch.intensity) : null,
+          recordUndo,
+        });
+        onProjectUpdate(resp);
+      } catch (e) {
+        errorMsg = String(e);
+      }
+    }, recordUndo);
+  }
+
+  function liveUpdateMask(patch, recordUndo = false) {
+    if (!selectedLayer) return;
+    const l = selectedLayer;
+    scheduleLive(async () => {
+      try {
+        const resp = await invoke('update_layer_mask', {
+          layerId: l.id,
+          maskShape: patch.mask_shape ?? null,
+          maskRadius: patch.mask_radius !== undefined ? Number(patch.mask_radius) : null,
+          recordUndo,
+        });
+        onProjectUpdate(resp);
+      } catch (e) {
+        errorMsg = String(e);
+      }
+    }, recordUndo);
+  }
+
+  async function liveUpdateClipToBelow(enabled) {
+    if (!selectedLayer) return;
+    const resp = await runCmd('set_clip_to_below', { layerId: selectedLayer.id, enabled, recordUndo: true }, 'Clip to Below');
+    if (resp) onProjectUpdate(resp);
+  }
+
+  async function addShapeAdvanced(shapeType, sides = 5) {
+    if (!hasProject || isProcessing) return;
+    const resp = await runCmd('add_shape_advanced', {
+      shapeType,
+      width: 240,
+      height: shapeType === 'line' ? 16 : 240,
+      fillHex: shapeColor,
+      borderRadius: shapeType === 'rectangle' ? 16 : 0,
+      borderHex: shapeWithBorder ? shapeBorderColor : null,
+      borderWidth: shapeWithBorder ? shapeBorderWidth : 0,
+      sides,
+    }, `Add ${shapeType}`);
+    if (resp?.layers?.length) selectedLayerIds = [resp.layers[resp.layers.length - 1].id];
   }
 
   function liveUpdateEffects(patch, recordUndo = false) {
@@ -1132,6 +1288,12 @@
                 <button class="btn-ghost" onclick={() => addShape('rectangle')} disabled={!hasProject || isProcessing}>Rect</button>
                 <button class="btn-ghost" onclick={() => addShape('circle')} disabled={!hasProject || isProcessing}>Circle</button>
                 <button class="btn-ghost" onclick={() => addShape('badge')} disabled={!hasProject || isProcessing}>Badge</button>
+                <button class="btn-ghost" onclick={() => addShapeAdvanced('line')} disabled={!hasProject || isProcessing}>Line</button>
+                <button class="btn-ghost" onclick={() => addShapeAdvanced('arrow')} disabled={!hasProject || isProcessing}>Arrow</button>
+                <button class="btn-ghost" onclick={() => addShapeAdvanced('triangle')} disabled={!hasProject || isProcessing}>Triangle</button>
+                <button class="btn-ghost" onclick={() => addShapeAdvanced('star', 5)} disabled={!hasProject || isProcessing}>Star</button>
+                <button class="btn-ghost" onclick={() => addShapeAdvanced('polygon', 6)} disabled={!hasProject || isProcessing}>Hexagon</button>
+                <button class="btn-ghost" onclick={() => addShapeAdvanced('polygon', 8)} disabled={!hasProject || isProcessing}>Octagon</button>
               </div>
 
               <div class="divider"></div>
@@ -1229,12 +1391,28 @@
               </div>
 
               <div class="field-block">
-                <label class="field-lbl">Font Family</label>
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                  <label class="field-lbl">Font Family</label>
+                  <button class="btn-ghost sm" onclick={importCustomFont} title="Import .ttf or .otf font">
+                    <Upload size={11} /> Import Font
+                  </button>
+                </div>
                 <div class="font-grid">
-                  {#each fontStyles as fs}
+                  {#each allFontStyles as fs}
                     <button class="font-btn" class:selected={fontStyle === fs.id} onclick={() => (fontStyle = fs.id)}>{fs.label}</button>
                   {/each}
                 </div>
+                {#if importedFonts.length > 0}
+                  <div class="section-title" style="margin-top:6px;">Imported Fonts ({importedFonts.length})</div>
+                  <div class="layer-list" style="max-height:90px; overflow-y:auto;">
+                    {#each importedFonts as fn}
+                      <div class="layer-row" style="padding:4px 6px; font-size:11px; display:flex; justify-content:space-between; align-items:center;">
+                        <button class="btn-ghost sm" style="flex:1; text-align:left; border:none;" onclick={() => (fontStyle = fn)}>{fn}</button>
+                        <button class="lib-del" style="position:static;" onclick={() => deleteCustomFont(fn)} title="Remove font"><X size={10} /></button>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
               </div>
 
               <div class="input-grid-2">
@@ -1453,13 +1631,15 @@
         {canvasH}
         {brandColors}
         {recentColors}
-        {fontStyles}
+        fontStyles={allFontStyles}
         onSaveBrandColor={saveBrandColor}
         onRemoveBrandColor={removeBrandColor}
         onCheckpoint={pushCheckpoint}
         onLiveTransform={liveUpdateTransform}
         onLiveText={liveUpdateText}
         onLiveShape={liveUpdateShape}
+        onLiveShadow={liveUpdateShadow}
+        onLiveGlow={liveUpdateGlow}
         onFlip={(id, horizontal) => runCmd('flip_layer', { layerId: id, horizontal }, horizontal ? 'Flip H' : 'Flip V')}
         onReplaceImage={replaceImageLayer}
         onQuickRemoveBg={quickRemoveBg}
@@ -1587,7 +1767,7 @@
       {hasProject}
       {project}
       {selectedLayer}
-      {fontStyles}
+      fontStyles={allFontStyles}
       {filters}
       {brandColors}
       {recentColors}
@@ -1596,9 +1776,14 @@
       onCheckpoint={pushCheckpoint}
       onLiveTransform={liveUpdateTransform}
       onLiveText={liveUpdateText}
+      onLiveTextAdvanced={liveUpdateTextAdvanced}
       onLiveShape={liveUpdateShape}
       onLiveEffects={liveUpdateEffects}
       onLiveOutline={liveUpdateOutline}
+      onLiveShadow={liveUpdateShadow}
+      onLiveGlow={liveUpdateGlow}
+      onLiveMask={liveUpdateMask}
+      onLiveClipToBelow={liveUpdateClipToBelow}
       onFlip={(id, horizontal) => runCmd('flip_layer', { layerId: id, horizontal }, horizontal ? 'Flip H' : 'Flip V')}
       onResizeCanvas={(w, h) => runCmd('resize_canvas', { width: w, height: h, scaleLayers: true }, 'Resize Canvas')}
       onSetCanvasBg={(opts) => runCmd('set_canvas_background', opts, 'Set Canvas BG')}

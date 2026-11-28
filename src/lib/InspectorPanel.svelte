@@ -20,9 +20,14 @@
     onCheckpoint,
     onLiveTransform,
     onLiveText,
+    onLiveTextAdvanced,
     onLiveShape,
     onLiveEffects,
     onLiveOutline,
+    onLiveShadow,
+    onLiveGlow,
+    onLiveMask,
+    onLiveClipToBelow,
     onFlip,
     onResizeCanvas,
     onSetCanvasBg,
@@ -30,9 +35,12 @@
 
   let secPos = $state(true);
   let secApp = $state(true);
+  let secMask = $state(false);
   let secText = $state(true);
   let secShape = $state(true);
   let secFx = $state(true);
+  let secShadow = $state(false);
+  let secGlow = $state(false);
   let secColor = $state(false);
   let aspectLocked = $state(true);
 
@@ -62,14 +70,50 @@
   let tStrokeColor = $state('#000000');
   let tStrokeW = $state(0);
   let tDepth = $state(0);
+  let tUnderline = $state(false);
+  let tGradEnabled = $state(false);
+  let tGradFrom = $state('#FFFFFF');
+  let tGradTo = $state('#38BDF8');
+  let tGradAngle = $state(90);
+  let tCurve = $state(0);
 
   // Shape
+  let sType = $state('rectangle');
   let sWidth = $state(240);
   let sHeight = $state(240);
   let sFill = $state('#6366F1');
   let sRadius = $state(16);
   let sBorderColor = $state('#FFFFFF');
   let sBorderW = $state(0);
+  let sSides = $state(5);
+  let sRadTL = $state(0);
+  let sRadTR = $state(0);
+  let sRadBR = $state(0);
+  let sRadBL = $state(0);
+  let sGradEnabled = $state(false);
+  let sGradFrom = $state('#6366F1');
+  let sGradTo = $state('#38BDF8');
+  let sGradAngle = $state(45);
+
+  // Mask & Clip
+  let mShape = $state('none');
+  let mRadius = $state(24);
+  let mClip = $state(false);
+
+  // Drop Shadow & Glow
+  let shEnabled = $state(false);
+  let shColor = $state('#000000');
+  let shBlur = $state(12);
+  let shDist = $state(8);
+  let shAngle = $state(135);
+  let shOpacity = $state(60);
+
+  let ogEnabled = $state(false);
+  let ogColor = $state('#38BDF8');
+  let ogIntensity = $state(10);
+  let igEnabled = $state(false);
+  let igColor = $state('#FFFFFF');
+  let igIntensity = $state(8);
 
   // Effects & Outline
   let outEnabled = $state(false);
@@ -116,6 +160,25 @@
       fxBlur = selectedLayer.effects?.blur ?? 0;
       fxFilter = selectedLayer.effects?.filter ?? 'original';
 
+      mShape = selectedLayer.mask_shape ?? 'none';
+      mRadius = selectedLayer.mask_radius ?? 24;
+      mClip = Boolean(selectedLayer.clip_to_below);
+
+      shEnabled = Boolean(selectedLayer.shadow?.enabled);
+      shColor = rgbaToHex(selectedLayer.shadow?.color ?? [0, 0, 0, 255]);
+      shBlur = selectedLayer.shadow?.blur ?? 12;
+      shDist = selectedLayer.shadow?.distance ?? 8;
+      shAngle = selectedLayer.shadow?.angle ?? 135;
+      shOpacity = selectedLayer.shadow?.opacity ?? 60;
+
+      ogEnabled = Boolean(selectedLayer.outer_glow?.enabled);
+      ogColor = rgbaToHex(selectedLayer.outer_glow?.color ?? [56, 189, 248, 255]);
+      ogIntensity = selectedLayer.outer_glow?.intensity ?? 10;
+
+      igEnabled = Boolean(selectedLayer.inner_glow?.enabled);
+      igColor = rgbaToHex(selectedLayer.inner_glow?.color ?? [255, 255, 255, 255]);
+      igIntensity = selectedLayer.inner_glow?.intensity ?? 8;
+
       if (selectedLayer.kind?.type === 'Text3D') {
         tContent = selectedLayer.kind.content;
         tFont = selectedLayer.kind.font_style;
@@ -129,13 +192,34 @@
         tStrokeColor = rgbaToHex(selectedLayer.kind.stroke_color);
         tStrokeW = selectedLayer.kind.stroke_width;
         tDepth = selectedLayer.kind.depth;
+        tUnderline = Boolean(selectedLayer.kind.underline);
+        tGradEnabled = Boolean(selectedLayer.kind.gradient_colors);
+        if (selectedLayer.kind.gradient_colors) {
+          tGradFrom = rgbaToHex(selectedLayer.kind.gradient_colors[0]);
+          tGradTo = rgbaToHex(selectedLayer.kind.gradient_colors[1]);
+        }
+        tGradAngle = selectedLayer.kind.gradient_angle ?? 90;
+        tCurve = selectedLayer.kind.curve_amount ?? 0;
       } else if (selectedLayer.kind?.type === 'Shape') {
+        sType = selectedLayer.kind.shape_type ?? 'rectangle';
         sWidth = selectedLayer.kind.width;
         sHeight = selectedLayer.kind.height;
         sFill = rgbaToHex(selectedLayer.kind.fill_color);
         sRadius = selectedLayer.kind.border_radius;
         sBorderColor = rgbaToHex(selectedLayer.kind.border_color ?? [255, 255, 255, 255]);
         sBorderW = selectedLayer.kind.border_width ?? 0;
+        sSides = selectedLayer.kind.sides ?? 5;
+        const cr = selectedLayer.kind.corner_radii;
+        sRadTL = cr ? cr[0] : sRadius;
+        sRadTR = cr ? cr[1] : sRadius;
+        sRadBR = cr ? cr[2] : sRadius;
+        sRadBL = cr ? cr[3] : sRadius;
+        sGradEnabled = Boolean(selectedLayer.kind.fill_gradient);
+        if (selectedLayer.kind.fill_gradient) {
+          sGradFrom = rgbaToHex(selectedLayer.kind.fill_gradient.from);
+          sGradTo = rgbaToHex(selectedLayer.kind.fill_gradient.to);
+          sGradAngle = selectedLayer.kind.fill_gradient.angle ?? 45;
+        }
       }
     }
   });
@@ -315,6 +399,55 @@
         {/if}
       </div>
 
+      <!-- ══ MASK & CLIPPING ══ -->
+      <div class="sec">
+        <button class="sec-head" onclick={() => (secMask = !secMask)}>
+          {#if secMask}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
+          <span>Mask &amp; Clipping</span>
+        </button>
+        {#if secMask}
+          <div class="field-col">
+            <span class="mini-lbl">Shape Mask</span>
+            <select
+              class="select-input"
+              value={mShape}
+              onchange={(e) => {
+                const val = e.currentTarget.value;
+                mShape = val;
+                onLiveMask?.({ mask_shape: val === 'none' ? null : val, mask_radius: mRadius }, true);
+              }}
+            >
+              <option value="none">None</option>
+              <option value="circle">Circle / Ellipse</option>
+              <option value="rounded">Rounded Rect</option>
+              <option value="star">Star (5-pt)</option>
+            </select>
+          </div>
+          {#if mShape === 'rounded'}
+            <ScrubNumber
+              label="Mask Radius"
+              bind:value={mRadius}
+              min={0}
+              max={400}
+              onScrubStart={onCheckpoint}
+              onLiveChange={(v) => onLiveMask?.({ mask_shape: 'rounded', mask_radius: v }, false)}
+              onCommit={(v) => onLiveMask?.({ mask_shape: 'rounded', mask_radius: v }, false)}
+            />
+          {/if}
+          <label class="checkbox-row">
+            <input
+              type="checkbox"
+              checked={mClip}
+              onchange={(e) => {
+                mClip = e.currentTarget.checked;
+                onLiveClipToBelow?.(mClip);
+              }}
+            />
+            <span>Clip to Layer Below</span>
+          </label>
+        {/if}
+      </div>
+
       <!-- ══ TEXT (Live Edit) ══ -->
       {#if selectedLayer.kind?.type === 'Text3D'}
         <div class="sec">
@@ -424,6 +557,76 @@
               onLiveChange={(v) => onLiveText({ depth_3d: v }, false)}
               onCommit={(v) => onLiveText({ depth_3d: v }, false)}
             />
+
+            <label class="checkbox-row">
+              <input
+                type="checkbox"
+                checked={tUnderline}
+                onchange={(e) => {
+                  tUnderline = e.currentTarget.checked;
+                  onLiveTextAdvanced?.({ underline: tUnderline }, true);
+                }}
+              />
+              <span>Underline</span>
+            </label>
+
+            <ScrubNumber
+              label="Curve Arc °"
+              bind:value={tCurve}
+              min={-180}
+              max={180}
+              step={5}
+              onScrubStart={onCheckpoint}
+              onLiveChange={(v) => onLiveTextAdvanced?.({ curve_amount: v }, false)}
+              onCommit={(v) => onLiveTextAdvanced?.({ curve_amount: v }, false)}
+            />
+
+            <label class="checkbox-row">
+              <input
+                type="checkbox"
+                checked={tGradEnabled}
+                onchange={(e) => {
+                  tGradEnabled = e.currentTarget.checked;
+                  if (tGradEnabled) {
+                    onLiveTextAdvanced?.({ gradient_from_hex: tGradFrom, gradient_to_hex: tGradTo, gradient_angle: tGradAngle }, true);
+                  } else {
+                    onLiveTextAdvanced?.({ clear: true }, true);
+                  }
+                }}
+              />
+              <span>Gradient Fill</span>
+            </label>
+            {#if tGradEnabled}
+              <div class="grid-2">
+                <ColorPickerPopover
+                  label="From"
+                  bind:color={tGradFrom}
+                  {brandColors}
+                  {recentColors}
+                  {onSaveBrandColor}
+                  {onRemoveBrandColor}
+                  onChange={(hex) => onLiveTextAdvanced?.({ gradient_from_hex: hex, gradient_to_hex: tGradTo, gradient_angle: tGradAngle }, true)}
+                />
+                <ColorPickerPopover
+                  label="To"
+                  bind:color={tGradTo}
+                  {brandColors}
+                  {recentColors}
+                  {onSaveBrandColor}
+                  {onRemoveBrandColor}
+                  onChange={(hex) => onLiveTextAdvanced?.({ gradient_from_hex: tGradFrom, gradient_to_hex: hex, gradient_angle: tGradAngle }, true)}
+                />
+              </div>
+              <ScrubNumber
+                label="Grad Angle °"
+                bind:value={tGradAngle}
+                min={0}
+                max={360}
+                onScrubStart={onCheckpoint}
+                onLiveChange={(v) => onLiveTextAdvanced?.({ gradient_from_hex: tGradFrom, gradient_to_hex: tGradTo, gradient_angle: v }, false)}
+                onCommit={(v) => onLiveTextAdvanced?.({ gradient_from_hex: tGradFrom, gradient_to_hex: tGradTo, gradient_angle: v }, false)}
+              />
+            {/if}
           {/if}
         </div>
       {/if}
@@ -476,6 +679,51 @@
                 onCommit={(v) => onLiveShape({ border_width: v }, false)}
               />
             </div>
+
+            {#if sType === 'star' || sType === 'polygon'}
+              <ScrubNumber
+                label={sType === 'star' ? 'Points' : 'Sides'}
+                bind:value={sSides}
+                min={3}
+                max={12}
+                onScrubStart={onCheckpoint}
+                onLiveChange={(v) => onLiveShape({ sides: v }, false)}
+                onCommit={(v) => onLiveShape({ sides: v }, false)}
+              />
+            {/if}
+
+            {#if sType === 'rectangle'}
+              <div class="mini-lbl">Per-Corner Radii (TL / TR / BR / BL)</div>
+              <div class="grid-2">
+                <ScrubNumber label="TL" bind:value={sRadTL} min={0} max={250} onScrubStart={onCheckpoint} onLiveChange={(v) => onLiveShape({ corner_radii: [v, sRadTR, sRadBR, sRadBL] }, false)} onCommit={(v) => onLiveShape({ corner_radii: [v, sRadTR, sRadBR, sRadBL] }, false)} />
+                <ScrubNumber label="TR" bind:value={sRadTR} min={0} max={250} onScrubStart={onCheckpoint} onLiveChange={(v) => onLiveShape({ corner_radii: [sRadTL, v, sRadBR, sRadBL] }, false)} onCommit={(v) => onLiveShape({ corner_radii: [sRadTL, v, sRadBR, sRadBL] }, false)} />
+                <ScrubNumber label="BR" bind:value={sRadBR} min={0} max={250} onScrubStart={onCheckpoint} onLiveChange={(v) => onLiveShape({ corner_radii: [sRadTL, sRadTR, v, sRadBL] }, false)} onCommit={(v) => onLiveShape({ corner_radii: [sRadTL, sRadTR, v, sRadBL] }, false)} />
+                <ScrubNumber label="BL" bind:value={sRadBL} min={0} max={250} onScrubStart={onCheckpoint} onLiveChange={(v) => onLiveShape({ corner_radii: [sRadTL, sRadTR, sRadBR, v] }, false)} onCommit={(v) => onLiveShape({ corner_radii: [sRadTL, sRadTR, sRadBR, v] }, false)} />
+              </div>
+            {/if}
+
+            <label class="checkbox-row">
+              <input
+                type="checkbox"
+                checked={sGradEnabled}
+                onchange={(e) => {
+                  sGradEnabled = e.currentTarget.checked;
+                  if (sGradEnabled) {
+                    onLiveShape({ fill_gradient_from: sGradFrom, fill_gradient_to: sGradTo, fill_gradient_angle: sGradAngle }, true);
+                  } else {
+                    onLiveShape({ clear_fill_gradient: true }, true);
+                  }
+                }}
+              />
+              <span>Gradient Fill</span>
+            </label>
+            {#if sGradEnabled}
+              <div class="grid-2">
+                <ColorPickerPopover label="From" bind:color={sGradFrom} {brandColors} {recentColors} {onSaveBrandColor} {onRemoveBrandColor} onChange={(hex) => onLiveShape({ fill_gradient_from: hex, fill_gradient_to: sGradTo, fill_gradient_angle: sGradAngle }, true)} />
+                <ColorPickerPopover label="To" bind:color={sGradTo} {brandColors} {recentColors} {onSaveBrandColor} {onRemoveBrandColor} onChange={(hex) => onLiveShape({ fill_gradient_from: sGradFrom, fill_gradient_to: hex, fill_gradient_angle: sGradAngle }, true)} />
+              </div>
+              <ScrubNumber label="Grad Angle °" bind:value={sGradAngle} min={0} max={360} onScrubStart={onCheckpoint} onLiveChange={(v) => onLiveShape({ fill_gradient_from: sGradFrom, fill_gradient_to: sGradTo, fill_gradient_angle: v }, false)} onCommit={(v) => onLiveShape({ fill_gradient_from: sGradFrom, fill_gradient_to: sGradTo, fill_gradient_angle: v }, false)} />
+            {/if}
           {/if}
         </div>
       {/if}
@@ -529,6 +777,83 @@
               oninput={() => onLiveEffects({ blur: fxBlur }, false)}
             />
           </div>
+        {/if}
+      </div>
+
+      <!-- ══ DROP SHADOW ══ -->
+      <div class="sec">
+        <button class="sec-head" onclick={() => (secShadow = !secShadow)}>
+          {#if secShadow}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
+          <span>Drop Shadow</span>
+        </button>
+        {#if secShadow}
+          <label class="checkbox-row">
+            <input
+              type="checkbox"
+              checked={shEnabled}
+              onchange={(e) => {
+                shEnabled = e.currentTarget.checked;
+                onLiveShadow?.({ enabled: shEnabled }, true);
+              }}
+            />
+            <span>Enable Drop Shadow</span>
+          </label>
+          {#if shEnabled}
+            <div class="grid-2">
+              <ColorPickerPopover label="Shadow" bind:color={shColor} {brandColors} {recentColors} {onSaveBrandColor} {onRemoveBrandColor} onChange={(hex) => onLiveShadow?.({ enabled: true, color_hex: hex }, true)} />
+              <ScrubNumber label="Opacity %" bind:value={shOpacity} min={0} max={100} onScrubStart={onCheckpoint} onLiveChange={(v) => onLiveShadow?.({ enabled: true, opacity: v }, false)} onCommit={(v) => onLiveShadow?.({ enabled: true, opacity: v }, false)} />
+            </div>
+            <div class="grid-2">
+              <ScrubNumber label="Distance" bind:value={shDist} min={0} max={100} onScrubStart={onCheckpoint} onLiveChange={(v) => onLiveShadow?.({ enabled: true, distance: v }, false)} onCommit={(v) => onLiveShadow?.({ enabled: true, distance: v }, false)} />
+              <ScrubNumber label="Angle °" bind:value={shAngle} min={0} max={360} onScrubStart={onCheckpoint} onLiveChange={(v) => onLiveShadow?.({ enabled: true, angle: v }, false)} onCommit={(v) => onLiveShadow?.({ enabled: true, angle: v }, false)} />
+            </div>
+            <ScrubNumber label="Blur" bind:value={shBlur} min={0} max={40} onScrubStart={onCheckpoint} onLiveChange={(v) => onLiveShadow?.({ enabled: true, blur: v }, false)} onCommit={(v) => onLiveShadow?.({ enabled: true, blur: v }, false)} />
+          {/if}
+        {/if}
+      </div>
+
+      <!-- ══ OUTER & INNER GLOW ══ -->
+      <div class="sec">
+        <button class="sec-head" onclick={() => (secGlow = !secGlow)}>
+          {#if secGlow}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
+          <span>Glow Effects</span>
+        </button>
+        {#if secGlow}
+          <label class="checkbox-row">
+            <input
+              type="checkbox"
+              checked={ogEnabled}
+              onchange={(e) => {
+                ogEnabled = e.currentTarget.checked;
+                onLiveGlow?.({ kind: 'outer', enabled: ogEnabled }, true);
+              }}
+            />
+            <span>Outer Glow</span>
+          </label>
+          {#if ogEnabled}
+            <div class="grid-2">
+              <ColorPickerPopover label="Color" bind:color={ogColor} {brandColors} {recentColors} {onSaveBrandColor} {onRemoveBrandColor} onChange={(hex) => onLiveGlow?.({ kind: 'outer', enabled: true, color_hex: hex }, true)} />
+              <ScrubNumber label="Intensity" bind:value={ogIntensity} min={1} max={40} onScrubStart={onCheckpoint} onLiveChange={(v) => onLiveGlow?.({ kind: 'outer', enabled: true, intensity: v }, false)} onCommit={(v) => onLiveGlow?.({ kind: 'outer', enabled: true, intensity: v }, false)} />
+            </div>
+          {/if}
+
+          <label class="checkbox-row">
+            <input
+              type="checkbox"
+              checked={igEnabled}
+              onchange={(e) => {
+                igEnabled = e.currentTarget.checked;
+                onLiveGlow?.({ kind: 'inner', enabled: igEnabled }, true);
+              }}
+            />
+            <span>Inner Glow</span>
+          </label>
+          {#if igEnabled}
+            <div class="grid-2">
+              <ColorPickerPopover label="Color" bind:color={igColor} {brandColors} {recentColors} {onSaveBrandColor} {onRemoveBrandColor} onChange={(hex) => onLiveGlow?.({ kind: 'inner', enabled: true, color_hex: hex }, true)} />
+              <ScrubNumber label="Intensity" bind:value={igIntensity} min={1} max={40} onScrubStart={onCheckpoint} onLiveChange={(v) => onLiveGlow?.({ kind: 'inner', enabled: true, intensity: v }, false)} onCommit={(v) => onLiveGlow?.({ kind: 'inner', enabled: true, intensity: v }, false)} />
+            </div>
+          {/if}
         {/if}
       </div>
 

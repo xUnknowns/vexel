@@ -5,7 +5,7 @@
     Trash2, Copy, Maximize2, FolderPlus,
     AlignStartVertical, AlignCenterVertical, AlignEndVertical,
     AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
-    Columns3, Rows3
+    Columns3, Rows3, Sparkles, SunDim
   } from 'lucide-svelte';
   import ScrubNumber from './ScrubNumber.svelte';
   import ColorPickerPopover from './ColorPickerPopover.svelte';
@@ -25,6 +25,8 @@
     onLiveTransform,
     onLiveText,
     onLiveShape,
+    onLiveShadow,
+    onLiveGlow,
     onFlip,
     onReplaceImage,
     onQuickRemoveBg,
@@ -181,6 +183,22 @@
       </button>
     </div>
     <div class="ctx-spacer"></div>
+    <button
+      class="ctx-icon"
+      class:active={selectedLayer.shadow?.enabled}
+      onclick={() => onLiveShadow?.({ enabled: !selectedLayer.shadow?.enabled }, true)}
+      title="Toggle Drop Shadow"
+    >
+      <SunDim size={13} strokeWidth={1.75} />
+    </button>
+    <button
+      class="ctx-icon"
+      class:active={selectedLayer.outer_glow?.enabled}
+      onclick={() => onLiveGlow?.({ kind: 'outer', enabled: !selectedLayer.outer_glow?.enabled }, true)}
+      title="Toggle Outer Glow"
+    >
+      <Sparkles size={13} strokeWidth={1.75} />
+    </button>
     <button class="ctx-icon" onclick={() => onDuplicate(selectedLayer.id)} title="Duplicate"><Copy size={13} strokeWidth={1.75} /></button>
     <button class="ctx-icon danger" onclick={() => onDelete(selectedLayer.id)} title="Delete"><Trash2 size={13} strokeWidth={1.75} /></button>
 
@@ -215,6 +233,22 @@
       </div>
     </div>
     <div class="ctx-spacer"></div>
+    <button
+      class="ctx-icon"
+      class:active={selectedLayer.shadow?.enabled}
+      onclick={() => onLiveShadow?.({ enabled: !selectedLayer.shadow?.enabled }, true)}
+      title="Toggle Drop Shadow"
+    >
+      <SunDim size={13} strokeWidth={1.75} />
+    </button>
+    <button
+      class="ctx-icon"
+      class:active={selectedLayer.outer_glow?.enabled}
+      onclick={() => onLiveGlow?.({ kind: 'outer', enabled: !selectedLayer.outer_glow?.enabled }, true)}
+      title="Toggle Outer Glow"
+    >
+      <Sparkles size={13} strokeWidth={1.75} />
+    </button>
     <button class="ctx-icon" onclick={() => onDuplicate(selectedLayer.id)} title="Duplicate"><Copy size={13} strokeWidth={1.75} /></button>
     <button class="ctx-icon danger" onclick={() => onDelete(selectedLayer.id)} title="Delete"><Trash2 size={13} strokeWidth={1.75} /></button>
 
@@ -268,6 +302,22 @@
       </div>
     </div>
     <div class="ctx-spacer"></div>
+    <button
+      class="ctx-icon"
+      class:active={selectedLayer.shadow?.enabled}
+      onclick={() => onLiveShadow?.({ enabled: !selectedLayer.shadow?.enabled }, true)}
+      title="Toggle Drop Shadow"
+    >
+      <SunDim size={13} strokeWidth={1.75} />
+    </button>
+    <button
+      class="ctx-icon"
+      class:active={selectedLayer.outer_glow?.enabled}
+      onclick={() => onLiveGlow?.({ kind: 'outer', enabled: !selectedLayer.outer_glow?.enabled }, true)}
+      title="Toggle Outer Glow"
+    >
+      <Sparkles size={13} strokeWidth={1.75} />
+    </button>
     <button class="ctx-icon" onclick={() => onDuplicate(selectedLayer.id)} title="Duplicate"><Copy size={13} strokeWidth={1.75} /></button>
     <button class="ctx-icon danger" onclick={() => onDelete(selectedLayer.id)} title="Delete"><Trash2 size={13} strokeWidth={1.75} /></button>
 
@@ -288,6 +338,22 @@
       </div>
     </div>
     <div class="ctx-spacer"></div>
+    <button
+      class="ctx-icon"
+      class:active={selectedLayer.shadow?.enabled}
+      onclick={() => onLiveShadow?.({ enabled: !selectedLayer.shadow?.enabled }, true)}
+      title="Toggle Drop Shadow"
+    >
+      <SunDim size={13} strokeWidth={1.75} />
+    </button>
+    <button
+      class="ctx-icon"
+      class:active={selectedLayer.outer_glow?.enabled}
+      onclick={() => onLiveGlow?.({ kind: 'outer', enabled: !selectedLayer.outer_glow?.enabled }, true)}
+      title="Toggle Outer Glow"
+    >
+      <Sparkles size={13} strokeWidth={1.75} />
+    </button>
     <button class="ctx-icon" onclick={() => onDuplicate(selectedLayer.id)} title="Duplicate"><Copy size={13} strokeWidth={1.75} /></button>
     <button class="ctx-icon danger" onclick={() => onDelete(selectedLayer.id)} title="Delete"><Trash2 size={13} strokeWidth={1.75} /></button>
   {/if}
