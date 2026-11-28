@@ -847,6 +847,7 @@ pub fn update_layer_transform(
 
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn update_layer_effects(
     state: tauri::State<'_, SharedProjectState>,
     layer_id: String,
@@ -855,6 +856,14 @@ pub fn update_layer_effects(
     saturation: f32,
     blur: f32,
     filter: String,
+    hue_shift: Option<f32>,
+    temperature: Option<f32>,
+    sharpness: Option<f32>,
+    vignette: Option<f32>,
+    levels_black: Option<u8>,
+    levels_white: Option<u8>,
+    levels_gamma: Option<f32>,
+    lut_preset: Option<String>,
     record_undo: Option<bool>,
 ) -> Result<ProjectResponse, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
@@ -873,6 +882,14 @@ pub fn update_layer_effects(
         saturation,
         blur: blur.max(0.0),
         filter,
+        hue_shift: hue_shift.unwrap_or(layer.effects.hue_shift).clamp(-180.0, 180.0),
+        temperature: temperature.unwrap_or(layer.effects.temperature).clamp(-100.0, 100.0),
+        sharpness: sharpness.unwrap_or(layer.effects.sharpness).clamp(0.0, 100.0),
+        vignette: vignette.unwrap_or(layer.effects.vignette).clamp(0.0, 100.0),
+        levels_black: levels_black.unwrap_or(layer.effects.levels_black).min(250),
+        levels_white: levels_white.unwrap_or(layer.effects.levels_white).max(5),
+        levels_gamma: levels_gamma.unwrap_or(layer.effects.levels_gamma).clamp(0.2, 3.0),
+        lut_preset: lut_preset.unwrap_or_else(|| layer.effects.lut_preset.clone()),
     };
     render_and_respond(&mut s)
 }
@@ -1077,18 +1094,242 @@ pub fn export_configured(
         }
     }
 
-    match format.as_str() {
+    save_image_formatted(&img, dest, &format, quality)?;
+    Ok(dest_path)
+}
+
+fn save_image_formatted(
+    img: &image::DynamicImage,
+    dest: &Path,
+    format: &str,
+    quality: u8,
+) -> Result<(), String> {
+    match format {
         "jpeg" | "jpg" => {
             let file = std::fs::File::create(dest).map_err(|e| e.to_string())?;
             let mut enc =
                 image::codecs::jpeg::JpegEncoder::new_with_quality(file, quality.clamp(1, 100));
             enc.encode_image(&img.to_rgb8()).map_err(|e| e.to_string())?;
         }
+        "svg" => {
+            let mut png_bytes: Vec<u8> = Vec::new();
+            img.write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+                .map_err(|e| e.to_string())?;
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+            let svg = format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">
+  <image width="{w}" height="{h}" href="data:image/png;base64,{b64}"/>
+</svg>
+"#,
+                w = img.width(),
+                h = img.height(),
+                b64 = b64
+            );
+            std::fs::write(dest, svg).map_err(|e| e.to_string())?;
+        }
+        "pdf" => {
+            let mut jpg_bytes: Vec<u8> = Vec::new();
+            {
+                let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                    &mut jpg_bytes,
+                    quality.clamp(1, 100),
+                );
+                enc.encode_image(&img.to_rgb8()).map_err(|e| e.to_string())?;
+            }
+            let w = img.width();
+            let h = img.height();
+            let mut pdf: Vec<u8> = Vec::new();
+            pdf.extend_from_slice(b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+            let mut offsets = vec![0usize];
+            let push_obj = |pdf: &mut Vec<u8>, offsets: &mut Vec<usize>, body: &[u8]| {
+                offsets.push(pdf.len());
+                pdf.extend_from_slice(body);
+            };
+            push_obj(&mut pdf, &mut offsets, b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+            push_obj(&mut pdf, &mut offsets, b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+            let p3 = format!(
+                "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>\nendobj\n"
+            );
+            push_obj(&mut pdf, &mut offsets, p3.as_bytes());
+            let mut p4 = format!(
+                "4 0 obj\n<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n",
+                jpg_bytes.len()
+            ).into_bytes();
+            p4.extend_from_slice(&jpg_bytes);
+            p4.extend_from_slice(b"\nendstream\nendobj\n");
+            push_obj(&mut pdf, &mut offsets, &p4);
+            let stream_c = format!("q\n{w} 0 0 {h} 0 0 cm\n/Im0 Do\nQ\n");
+            let p5 = format!(
+                "5 0 obj\n<< /Length {} >>\nstream\n{}endstream\nendobj\n",
+                stream_c.len(),
+                stream_c
+            );
+            push_obj(&mut pdf, &mut offsets, p5.as_bytes());
+            let xref_pos = pdf.len();
+            pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len()).as_bytes());
+            for off in offsets.iter().skip(1) {
+                pdf.extend_from_slice(format!("{:010} 00000 n \n", off).as_bytes());
+            }
+            pdf.extend_from_slice(
+                format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", offsets.len(), xref_pos).as_bytes(),
+            );
+            std::fs::write(dest, pdf).map_err(|e| e.to_string())?;
+        }
+        "ico" => {
+            let sizes: [u32; 5] = [16, 32, 48, 64, 256];
+            let mut frames: Vec<(u32, Vec<u8>)> = Vec::new();
+            for sz in sizes {
+                let resized = img.resize_exact(sz, sz, FilterType::Lanczos3);
+                let mut png_buf: Vec<u8> = Vec::new();
+                resized
+                    .write_to(&mut std::io::Cursor::new(&mut png_buf), image::ImageFormat::Png)
+                    .map_err(|e| e.to_string())?;
+                frames.push((sz, png_buf));
+            }
+            let count = frames.len() as u16;
+            let mut ico: Vec<u8> = Vec::new();
+            ico.extend_from_slice(&0u16.to_le_bytes());
+            ico.extend_from_slice(&1u16.to_le_bytes());
+            ico.extend_from_slice(&count.to_le_bytes());
+            let mut offset = 6u32 + (count as u32) * 16;
+            for (sz, data) in &frames {
+                let dim = if *sz >= 256 { 0u8 } else { *sz as u8 };
+                ico.push(dim);
+                ico.push(dim);
+                ico.push(0);
+                ico.push(0);
+                ico.extend_from_slice(&1u16.to_le_bytes());
+                ico.extend_from_slice(&32u16.to_le_bytes());
+                ico.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                ico.extend_from_slice(&offset.to_le_bytes());
+                offset += data.len() as u32;
+            }
+            for (_, data) in frames {
+                ico.extend_from_slice(&data);
+            }
+            std::fs::write(dest, ico).map_err(|e| e.to_string())?;
+        }
         _ => {
             img.save(dest).map_err(|e| e.to_string())?;
         }
     }
-    Ok(dest_path)
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+pub struct BatchPresetInput {
+    pub id: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[tauri::command]
+pub fn export_batch(
+    state: tauri::State<'_, SharedProjectState>,
+    dest_dir: String,
+    base_name: String,
+    format: String,
+    quality: u8,
+    presets: Vec<BatchPresetInput>,
+) -> Result<Vec<String>, String> {
+    if presets.is_empty() {
+        return Err("No presets selected for batch export.".to_string());
+    }
+    let mut snapshot = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        if !s.has_project {
+            return Err("No active project to export.".to_string());
+        }
+        s.current.clone()
+    };
+    let img = render_project_composite(&mut snapshot, "")?;
+    let dir = Path::new(&dest_dir);
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let ext = if format == "jpeg" { "jpg" } else { format.as_str() };
+    let mut saved = Vec::new();
+    for p in presets {
+        let resized = img.resize_exact(p.width.max(1), p.height.max(1), FilterType::Lanczos3);
+        let out_path = dir.join(format!("{}_{}_{}x{}.{}", base_name, p.id, p.width, p.height, ext));
+        save_image_formatted(&resized, &out_path, &format, quality)?;
+        saved.push(out_path.to_string_lossy().to_string());
+    }
+    Ok(saved)
+}
+
+#[tauri::command]
+pub fn trim_transparency(
+    state: tauri::State<'_, SharedProjectState>,
+) -> Result<ProjectResponse, String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    if !s.has_project {
+        return Err("No active project.".to_string());
+    }
+    let rendered = render_project_composite(&mut s.current, "")?.to_rgba8();
+    let (w, h) = (rendered.width(), rendered.height());
+    let mut min_x = w;
+    let mut min_y = h;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    for (x, y, px) in rendered.enumerate_pixels() {
+        if px[3] > 0 {
+            if x < min_x { min_x = x; }
+            if y < min_y { min_y = y; }
+            if x > max_x { max_x = x; }
+            if y > max_y { max_y = y; }
+        }
+    }
+    if min_x > max_x || min_y > max_y {
+        return Err("Canvas is completely transparent.".to_string());
+    }
+    s.push_undo();
+    let nw = (max_x - min_x + 1).max(1);
+    let nh = (max_y - min_y + 1).max(1);
+    s.current.canvas_width = nw;
+    s.current.canvas_height = nh;
+    for l in &mut s.current.layers {
+        l.x -= min_x as i64;
+        l.y -= min_y as i64;
+    }
+    render_and_respond(&mut s)
+}
+
+#[tauri::command]
+pub fn save_autosave(state: tauri::State<'_, SharedProjectState>) -> Result<String, String> {
+    let snapshot = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        if !s.has_project {
+            return Ok(String::new());
+        }
+        s.current.clone()
+    };
+    let dir = appdata_subdir("autosave")?;
+    let dest = dir.join("autosave.veltrax");
+    let json = serde_json::to_string(&snapshot).map_err(|e| e.to_string())?;
+    std::fs::write(&dest, json).map_err(|e| e.to_string())?;
+    Ok(dest.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn check_autosave() -> Result<Option<String>, String> {
+    let dir = appdata_subdir("autosave")?;
+    let dest = dir.join("autosave.veltrax");
+    if dest.is_file() {
+        Ok(Some(dest.to_string_lossy().to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+pub fn clear_autosave() -> Result<(), String> {
+    let dir = appdata_subdir("autosave")?;
+    let dest = dir.join("autosave.veltrax");
+    if dest.is_file() {
+        let _ = std::fs::remove_file(&dest);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2400,4 +2641,354 @@ pub fn distribute_layers(
         }
     }
     render_and_respond(&mut s)
+}
+
+// -- Phase 6: Templates, Smart Text & Brand Sizes ------------------------------
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct TemplateInfo {
+    pub name: String,
+    pub file_path: String,
+    pub canvas_width: u32,
+    pub canvas_height: u32,
+    pub layer_count: usize,
+    pub preview_path: Option<String>,
+}
+
+fn templates_dir() -> std::path::PathBuf {
+    user_data_root().join("templates")
+}
+
+#[tauri::command]
+pub fn list_project_templates() -> Result<Vec<TemplateInfo>, String> {
+    let dir = templates_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut results = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("veltrax") {
+            continue;
+        }
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            if let Ok(snap) = serde_json::from_str::<crate::layers::ProjectSnapshot>(&raw) {
+                let name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("template")
+                    .to_string();
+                // Check for sibling preview PNG
+                let prev_path = path.with_extension("png");
+                let preview_path = if prev_path.is_file() {
+                    Some(prev_path.to_string_lossy().to_string())
+                } else {
+                    None
+                };
+                results.push(TemplateInfo {
+                    name,
+                    file_path: path.to_string_lossy().to_string(),
+                    canvas_width: snap.canvas_width,
+                    canvas_height: snap.canvas_height,
+                    layer_count: snap.layers.len(),
+                    preview_path,
+                });
+            }
+        }
+    }
+    results.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(results)
+}
+
+#[tauri::command]
+pub fn save_as_template(
+    state: tauri::State<'_, SharedProjectState>,
+    name: String,
+) -> Result<TemplateInfo, String> {
+    if name.trim().is_empty() {
+        return Err("Template name cannot be empty.".into());
+    }
+    // Sanitize filename
+    let safe_name: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let dir = templates_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let s = state.lock().map_err(|e| e.to_string())?;
+    if !s.has_project {
+        return Err("No active project to save as template.".into());
+    }
+    let snap = &s.current;
+    let json = serde_json::to_string_pretty(snap).map_err(|e| e.to_string())?;
+    let file_path = dir.join(format!("{}.veltrax", safe_name.trim()));
+    std::fs::write(&file_path, &json).map_err(|e| e.to_string())?;
+
+    // Render a small preview PNG (320 px wide max)
+    let preview_path = file_path.with_extension("png");
+    let tmp = std::env::temp_dir().join("veltrax-tpl-preview.png");
+    if render_project_composite(&mut snap.clone(), tmp.to_str().unwrap_or("")).is_ok() {
+        if let Ok(img) = image::open(&tmp) {
+            let (w, h) = (img.width(), img.height());
+            let thumb = if w > 320 {
+                let nw = 320u32;
+                let nh = ((h as f32 * 320.0 / w as f32) as u32).max(1);
+                img.resize_exact(nw, nh, FilterType::Triangle)
+            } else {
+                img
+            };
+            let _ = thumb.save(&preview_path);
+        }
+    }
+
+    Ok(TemplateInfo {
+        name: safe_name.trim().to_string(),
+        file_path: file_path.to_string_lossy().to_string(),
+        canvas_width: snap.canvas_width,
+        canvas_height: snap.canvas_height,
+        layer_count: snap.layers.len(),
+        preview_path: if preview_path.is_file() {
+            Some(preview_path.to_string_lossy().to_string())
+        } else {
+            None
+        },
+    })
+}
+
+#[tauri::command]
+pub fn delete_template(name: String) -> Result<(), String> {
+    let dir = templates_dir();
+    let safe_name: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let file_path = dir.join(format!("{}.veltrax", safe_name.trim()));
+    if file_path.is_file() {
+        std::fs::remove_file(&file_path).map_err(|e| e.to_string())?;
+    }
+    let prev_path = file_path.with_extension("png");
+    if prev_path.is_file() {
+        let _ = std::fs::remove_file(&prev_path);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn apply_template_to_canvas(
+    state: tauri::State<'_, SharedProjectState>,
+    template_path: String,
+) -> Result<ProjectResponse, String> {
+    let raw = std::fs::read_to_string(&template_path)
+        .map_err(|e| format!("Cannot read template '{}': {}", template_path, e))?;
+    let snap: crate::layers::ProjectSnapshot =
+        serde_json::from_str(&raw).map_err(|e| format!("Invalid template JSON: {}", e))?;
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.push_undo();
+    s.current = snap;
+    s.has_project = true;
+    s.is_in_editor = true;
+    render_and_respond(&mut s)
+}
+
+#[tauri::command]
+pub fn add_smart_text_layer(
+    state: tauri::State<'_, SharedProjectState>,
+    template: String,
+    vars: std::collections::HashMap<String, String>,
+    x: Option<i64>,
+    y: Option<i64>,
+    font_size: Option<u32>,
+    color: Option<String>,
+) -> Result<ProjectResponse, String> {
+    // Substitute {{key}} placeholders
+    let mut content = template.clone();
+    for (k, v) in &vars {
+        content = content.replace(&format!("{{{{{}}}}}", k), v);
+    }
+
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let id = format!("smart_text_{}", ms);
+
+    let col = color.unwrap_or_else(|| "#FFFFFF".into());
+    let [r, g, b, a] = parse_hex_color(&col);
+
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.push_undo();
+    let (cx, cy) = (s.current.canvas_width as i64 / 2, s.current.canvas_height as i64 / 2);
+
+    let layer = Layer {
+        id,
+        name: "Smart Text".into(),
+        visible: true,
+        locked: false,
+        opacity: 1.0,
+        x: x.unwrap_or(cx - 200),
+        y: y.unwrap_or(cy - 40),
+        scale: 1.0,
+        rotation: 0.0,
+        flip_h: false,
+        flip_v: false,
+        blend_mode: "normal".into(),
+        bounds_width: 400,
+        bounds_height: 80,
+        group_id: None,
+        effects: Default::default(),
+        outline: Default::default(),
+        shadow: Default::default(),
+        outer_glow: Default::default(),
+        inner_glow: Default::default(),
+        clip_to_below: false,
+        mask_shape: None,
+        mask_radius: 0,
+        alpha_mask_path: None,
+        kind: LayerKind::Text3D {
+            content,
+            font_style: "modern_sans".into(),
+            color: [r, g, b, a],
+            depth: 0,
+            shadow_color: [0, 0, 0, 180],
+            stroke_color: [0, 0, 0, 255],
+            stroke_width: 0,
+            size: font_size.unwrap_or(60) as f32,
+            bold: false,
+            italic: false,
+            align: "center".into(),
+            line_height: 1.2,
+            letter_spacing: 0.0,
+            underline: false,
+            gradient_colors: None,
+            gradient_angle: 0.0,
+            curve_amount: 0.0,
+        },
+    };
+
+    s.current.layers.push(layer);
+    render_and_respond(&mut s)
+}
+
+/// Brand kit canonical sizes (name ? width � height)
+const BRAND_SIZES: &[(&str, u32, u32)] = &[
+    ("instagram_post",        1080, 1080),
+    ("instagram_story",       1080, 1920),
+    ("twitter_post",          1200,  675),
+    ("twitter_header",        1500,  500),
+    ("facebook_post",         1200,  630),
+    ("linkedin_post",         1200,  628),
+    ("youtube_thumbnail",     1280,  720),
+    ("youtube_banner",        2560, 1440),
+    ("tiktok_video",          1080, 1920),
+    ("pinterest_pin",          600,  900),
+    ("og_image",              1200,  630),
+    ("email_header",          600,  200),
+];
+
+#[tauri::command]
+pub fn list_brand_sizes() -> Vec<serde_json::Value> {
+    BRAND_SIZES
+        .iter()
+        .map(|(name, w, h)| serde_json::json!({ "name": name, "width": w, "height": h }))
+        .collect()
+}
+
+#[tauri::command]
+pub fn export_all_brand_sizes(
+    state: tauri::State<'_, SharedProjectState>,
+    dest_dir: String,
+    format: String,
+    quality: u8,
+) -> Result<Vec<String>, String> {
+    std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+    let s = state.lock().map_err(|e| e.to_string())?;
+    if !s.has_project {
+        return Err("No active project.".into());
+    }
+
+    // Render at native canvas size once
+    let tmp_base = std::env::temp_dir().join("veltrax-brand-base.png");
+    let snap = s.current.clone();
+    drop(s); // Release lock before rendering (render is expensive)
+
+    render_project_composite(&mut snap.clone(), tmp_base.to_str().unwrap_or(""))?;
+    let base_img = image::open(&tmp_base).map_err(|e| e.to_string())?;
+
+    let ext = match format.as_str() {
+        "jpeg" | "jpg" => "jpg",
+        "webp" => "webp",
+        _ => "png",
+    };
+
+    let mut saved = Vec::new();
+    for (name, target_w, target_h) in BRAND_SIZES {
+        let resized = base_img.resize_exact(*target_w, *target_h, FilterType::Lanczos3);
+        let out_path = std::path::Path::new(&dest_dir).join(format!("{}.{}", name, ext));
+        save_image_formatted(&resized, out_path.to_str().unwrap_or(""), &format, quality)?;
+        saved.push(out_path.to_string_lossy().to_string());
+    }
+    Ok(saved)
+}
+
+/// Return full serialized project snapshot for AI/MCP inspection.
+#[tauri::command]
+pub fn get_project_state(
+    state: tauri::State<'_, SharedProjectState>,
+) -> Result<serde_json::Value, String> {
+    let s = state.lock().map_err(|e| e.to_string())?;
+    if !s.has_project {
+        return Err("No active project.".into());
+    }
+    serde_json::to_value(&s.current).map_err(|e| e.to_string())
+}
+
+/// Render 64px PNG thumbnails for each layer in the active project.
+#[tauri::command]
+pub fn get_layer_thumbnails(
+    state: tauri::State<'_, SharedProjectState>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    use base64::Engine;
+    let s = state.lock().map_err(|e| e.to_string())?;
+    if !s.has_project {
+        return Ok(std::collections::HashMap::new());
+    }
+    let layers = s.current.layers.clone();
+    drop(s);
+
+    let mut out = std::collections::HashMap::new();
+    for layer in &layers {
+        if let Ok(img) = render_layer_kind(&layer.kind) {
+            let (w, h) = (img.width().max(1), img.height().max(1));
+            let scale = (64.0 / w.max(h) as f32).min(1.0);
+            let nw = ((w as f32 * scale) as u32).max(1);
+            let nh = ((h as f32 * scale) as u32).max(1);
+            let thumb = img.resize_exact(nw, nh, FilterType::Triangle);
+            let mut buf = Vec::new();
+            if thumb
+                .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+                .is_ok()
+            {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
+                out.insert(layer.id.clone(), format!("data:image/png;base64,{}", b64));
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[derive(serde::Serialize)]
+pub struct HistoryInfo {
+    pub undo_count: usize,
+    pub redo_count: usize,
+}
+
+#[tauri::command]
+pub fn get_history_info(
+    state: tauri::State<'_, SharedProjectState>,
+) -> Result<HistoryInfo, String> {
+    let s = state.lock().map_err(|e| e.to_string())?;
+    Ok(HistoryInfo {
+        undo_count: s.undo_stack.len(),
+        redo_count: s.redo_stack.len(),
+    })
 }

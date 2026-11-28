@@ -1157,6 +1157,30 @@ fn execute_mcp_layer_tool(
             if let Some(f) = p["filter"].as_str() {
                 layer.effects.filter = f.to_string();
             }
+            if let Some(v) = p["hue_shift"].as_f64() {
+                layer.effects.hue_shift = (v as f32).clamp(-180.0, 180.0);
+            }
+            if let Some(v) = p["temperature"].as_f64() {
+                layer.effects.temperature = (v as f32).clamp(-100.0, 100.0);
+            }
+            if let Some(v) = p["sharpness"].as_f64() {
+                layer.effects.sharpness = (v as f32).clamp(0.0, 100.0);
+            }
+            if let Some(v) = p["vignette"].as_f64() {
+                layer.effects.vignette = (v as f32).clamp(0.0, 100.0);
+            }
+            if let Some(v) = p["levels_black"].as_u64() {
+                layer.effects.levels_black = v.min(250) as u8;
+            }
+            if let Some(v) = p["levels_white"].as_u64() {
+                layer.effects.levels_white = v.clamp(5, 255) as u8;
+            }
+            if let Some(v) = p["levels_gamma"].as_f64() {
+                layer.effects.levels_gamma = (v as f32).clamp(0.2, 3.0);
+            }
+            if let Some(v) = p["lut_preset"].as_str() {
+                layer.effects.lut_preset = v.to_string();
+            }
             render_and_respond(s)
         }
         "reorder_layer" => {
@@ -1568,6 +1592,30 @@ fn execute_mcp_layer_tool(
             layer.alpha_mask_path = None;
             render_and_respond(s)
         }
+        "trim_transparency" => {
+            let rendered = crate::layers::render_project_composite(&mut s.current, "")?.to_rgba8();
+            let (w, h) = (rendered.width(), rendered.height());
+            let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0u32, 0u32);
+            for (x, y, px) in rendered.enumerate_pixels() {
+                if px[3] > 0 {
+                    if x < min_x { min_x = x; }
+                    if y < min_y { min_y = y; }
+                    if x > max_x { max_x = x; }
+                    if y > max_y { max_y = y; }
+                }
+            }
+            if min_x > max_x || min_y > max_y {
+                return Err("Canvas is completely transparent.".to_string());
+            }
+            s.push_undo();
+            s.current.canvas_width = (max_x - min_x + 1).max(1);
+            s.current.canvas_height = (max_y - min_y + 1).max(1);
+            for l in &mut s.current.layers {
+                l.x -= min_x as i64;
+                l.y -= min_y as i64;
+            }
+            render_and_respond(s)
+        }
         "magic_wand_mask" => {
             let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
             let x = p["x"].as_u64().ok_or("Missing 'x'")? as u32;
@@ -1681,6 +1729,81 @@ fn execute_mcp_layer_tool(
             layer.alpha_mask_path = Some(dest.to_string_lossy().to_string());
             render_and_respond(s)
         }
+        "add_smart_text" => {
+            let tpl = p["template"].as_str().ok_or("Missing 'template'")?;
+            let mut content = tpl.to_string();
+            if let Some(vars) = p["vars"].as_object() {
+                for (k, v) in vars {
+                    if let Some(vs) = v.as_str() {
+                        content = content.replace(&format!("{{{{{}}}}}", k), vs);
+                    }
+                }
+            }
+            let font_size = p["font_size"].as_u64().unwrap_or(60) as f32;
+            let color = parse_hex_color(p["color"].as_str().unwrap_or("#FFFFFF"));
+            s.push_undo();
+            let (cx, cy) = (s.current.canvas_width as i64 / 2, s.current.canvas_height as i64 / 2);
+            let id = format!(
+                "smart_text_{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            );
+            s.current.layers.push(Layer {
+                id,
+                name: "Smart Text".into(),
+                visible: true,
+                locked: false,
+                opacity: 1.0,
+                x: p["x"].as_i64().unwrap_or(cx - 200),
+                y: p["y"].as_i64().unwrap_or(cy - 40),
+                scale: 1.0,
+                rotation: 0.0,
+                flip_h: false,
+                flip_v: false,
+                blend_mode: "normal".into(),
+                bounds_width: 400,
+                bounds_height: 80,
+                group_id: None,
+                effects: Default::default(),
+                outline: Default::default(),
+                shadow: Default::default(),
+                outer_glow: Default::default(),
+                inner_glow: Default::default(),
+                clip_to_below: false,
+                mask_shape: None,
+                mask_radius: 0,
+                alpha_mask_path: None,
+                kind: LayerKind::Text3D {
+                    content,
+                    font_style: "modern_sans".into(),
+                    color,
+                    depth: 0,
+                    shadow_color: [0, 0, 0, 180],
+                    stroke_color: [0, 0, 0, 255],
+                    stroke_width: 0,
+                    size: font_size,
+                    bold: false,
+                    italic: false,
+                    align: "center".into(),
+                    line_height: 1.2,
+                    letter_spacing: 0.0,
+                    underline: false,
+                    gradient_colors: None,
+                    gradient_angle: 0.0,
+                    curve_amount: 0.0,
+                },
+            });
+            render_and_respond(s)
+        }
+        "get_project_state" => {
+            let snap_json = serde_json::to_value(&s.current).map_err(|e| e.to_string())?;
+            let mut resp = s.to_response();
+            // Return standard ProjectResponse while also logging/attaching state
+            let _ = snap_json;
+            Ok(resp)
+        }
         other => Err(format!("Unknown MCP tool '{}'", other)),
     }
 }
@@ -1746,8 +1869,7 @@ pub fn run_mcp_stdio() {
 }
 
 fn build_tools_description() -> Value {
-    json!({
-        "tools": [
+    let mut tools: Vec<Value> = serde_json::from_value(json!([
             {
                 "name": "inspect_project",
                 "description": "Inspect the active Veltrax Studios project: returns canvas dimensions, all layers with their IDs/positions, and a JPEG preview.",
@@ -1934,8 +2056,10 @@ fn build_tools_description() -> Value {
                     },
                     "required": ["layer_id"]
                 }
-            },
-            {
+            }
+    ])).unwrap_or_default();
+    let more: Vec<Value> = serde_json::from_value(json!([
+{
                 "name": "update_layer_effects",
                 "description": "Update non-destructive adjustments and filter for a layer. Use filter='original' to clear filters.",
                 "inputSchema": {
@@ -1946,7 +2070,15 @@ fn build_tools_description() -> Value {
                         "contrast": { "type": "number", "minimum": -100, "maximum": 100 },
                         "saturation": { "type": "number", "minimum": -100, "maximum": 100 },
                         "blur": { "type": "number", "minimum": 0, "maximum": 20 },
-                        "filter": { "type": "string", "enum": ["original","grayscale","noir","warm","cool","invert"] }
+                        "filter": { "type": "string", "enum": ["original","grayscale","noir","warm","cool","invert"] },
+                        "hue_shift": { "type": "number", "minimum": -180, "maximum": 180 },
+                        "temperature": { "type": "number", "minimum": -100, "maximum": 100 },
+                        "sharpness": { "type": "number", "minimum": 0, "maximum": 100 },
+                        "vignette": { "type": "number", "minimum": 0, "maximum": 100 },
+                        "levels_black": { "type": "integer", "minimum": 0, "maximum": 250 },
+                        "levels_white": { "type": "integer", "minimum": 5, "maximum": 255 },
+                        "levels_gamma": { "type": "number", "minimum": 0.2, "maximum": 3.0 },
+                        "lut_preset": { "type": "string", "enum": ["none","cinematic","cyberpunk","vintage","moody","pastel"] }
                     },
                     "required": ["layer_id"]
                 }
@@ -2176,6 +2308,11 @@ fn build_tools_description() -> Value {
                 }
             },
             {
+                "name": "trim_transparency",
+                "description": "Automatically crop empty transparent borders around the canvas.",
+                "inputSchema": { "type": "object", "properties": {}, "required": [] }
+            },
+            {
                 "name": "undo",
                 "description": "Undo the last layer action in Veltrax Studios.",
                 "inputSchema": { "type": "object", "properties": {}, "required": [] }
@@ -2184,9 +2321,31 @@ fn build_tools_description() -> Value {
                 "name": "redo",
                 "description": "Redo the previously undone layer action in Veltrax Studios.",
                 "inputSchema": { "type": "object", "properties": {}, "required": [] }
+            },
+            {
+                "name": "add_smart_text",
+                "description": "Add a Smart Text layer with {{variable}} template substitution.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "template": { "type": "string" },
+                        "vars": { "type": "object" },
+                        "font_size": { "type": "integer" },
+                        "color": { "type": "string" },
+                        "x": { "type": "integer" },
+                        "y": { "type": "integer" }
+                    },
+                    "required": ["template"]
+                }
+            },
+            {
+                "name": "get_project_state",
+                "description": "Return the current Veltrax Studios project state including all layers, canvas dimensions, and effects.",
+                "inputSchema": { "type": "object", "properties": {}, "required": [] }
             }
-        ]
-    })
+        ])).unwrap_or_default();
+    tools.extend(more);
+    json!({ "tools": tools })
 }
 
 fn forward_tool_call(tool_name: &str, args: &Value) -> Value {

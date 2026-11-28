@@ -1,7 +1,7 @@
 <script>
-  import { X, Download } from 'lucide-svelte';
+  import { X, Download, FolderOpen } from 'lucide-svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { save } from '@tauri-apps/plugin-dialog';
+  import { open, save } from '@tauri-apps/plugin-dialog';
 
   let {
     show = false,
@@ -19,6 +19,8 @@
   let fileName = $state('export');
   let saving = $state(false);
   let feedback = $state('');
+  let batchMode = $state(false);
+  let batchSelected = $state(['yt_thumb', 'ig_post', 'tiktok']);
 
   $effect(() => {
     if (show) {
@@ -53,9 +55,78 @@
     { id: 'png', label: 'PNG', badge: 'Transparent' },
     { id: 'jpeg', label: 'JPEG', badge: 'Compact' },
     { id: 'webp', label: 'WebP', badge: 'Modern Web' },
+    { id: 'svg', label: 'SVG', badge: 'Scalable' },
+    { id: 'pdf', label: 'PDF', badge: 'Print / Doc' },
+    { id: 'ico', label: 'ICO', badge: 'Multi-Size' },
   ];
 
+  function toggleBatchPreset(id) {
+    if (batchSelected.includes(id)) {
+      batchSelected = batchSelected.filter((x) => x !== id);
+    } else {
+      batchSelected = [...batchSelected, id];
+    }
+  }
+
+  async function handleBatchSave() {
+    if (!hasProject || saving || batchSelected.length === 0) return;
+    saving = true;
+    feedback = '';
+    try {
+      const destDir = await open({ directory: true, multiple: false, title: 'Select Batch Export Folder' });
+      if (typeof destDir !== 'string' || !destDir) {
+        saving = false;
+        return;
+      }
+      const presetsPayload = sizePresets
+        .filter((p) => batchSelected.includes(p.id))
+        .map((p) => ({
+          id: p.id,
+          width: p.w ?? Math.max(1, Math.round(imgWidth * p.scale)),
+          height: p.h ?? Math.max(1, Math.round(imgHeight * p.scale)),
+        }));
+      const files = await invoke('export_batch', {
+        destDir,
+        baseName: fileName || 'export',
+        format,
+        quality: Number(quality),
+        presets: presetsPayload,
+      });
+      feedback = `Exported ${files.length} files to folder.`;
+      setTimeout(() => onClose(), 1200);
+    } catch (e) {
+      feedback = `Batch export failed: ${e}`;
+    } finally {
+      saving = false;
+    }
+  }
+
+  async function handleExportBrandSizes() {
+    if (!hasProject || saving) return;
+    saving = true;
+    feedback = '';
+    try {
+      const destDir = await open({ directory: true, multiple: false, title: 'Select Brand Kit Export Folder' });
+      if (typeof destDir !== 'string' || !destDir) {
+        saving = false;
+        return;
+      }
+      const files = await invoke('export_all_brand_sizes', {
+        destDir,
+        format: format === 'svg' || format === 'pdf' || format === 'ico' ? 'png' : format,
+        quality: Number(quality),
+      });
+      feedback = `Exported ${files.length} brand sizes to folder.`;
+      setTimeout(() => onClose(), 1300);
+    } catch (e) {
+      feedback = `Brand export failed: ${e}`;
+    } finally {
+      saving = false;
+    }
+  }
+
   async function handleSave() {
+    if (batchMode) return handleBatchSave();
     if (!hasProject || saving) return;
     saving = true;
     feedback = '';
@@ -69,6 +140,9 @@
           { name: 'PNG Image', extensions: ['png'] },
           { name: 'JPEG Image', extensions: ['jpg', 'jpeg'] },
           { name: 'WebP Image', extensions: ['webp'] },
+          { name: 'SVG Vector', extensions: ['svg'] },
+          { name: 'PDF Document', extensions: ['pdf'] },
+          { name: 'Windows Icon', extensions: ['ico'] },
         ],
       });
       if (!dest) {
@@ -145,19 +219,28 @@
         {/if}
 
         <div class="field-group">
-          <label class="field-label">Platform &amp; Resolution Presets</label>
+          <div class="field-label">
+            <span>{batchMode ? 'Batch Presets (Select Multiple)' : 'Platform & Resolution Presets'}</span>
+            <button class="batch-toggle" onclick={() => (batchMode = !batchMode)}>
+              {batchMode ? 'Switch to Single Export' : 'Batch Export Mode'}
+            </button>
+          </div>
           <div class="scale-row">
             {#each sizePresets as s}
               <button
                 class="scale-btn"
-                class:selected={sizeMode === s.id}
-                onclick={() => (sizeMode = s.id)}
+                class:selected={batchMode ? batchSelected.includes(s.id) : sizeMode === s.id}
+                onclick={() => (batchMode ? toggleBatchPreset(s.id) : (sizeMode = s.id))}
               >
                 {s.label}
               </button>
             {/each}
           </div>
-          <div class="dim-preview">Output: <strong>{finalW} × {finalH} px</strong></div>
+          {#if batchMode}
+            <div class="dim-preview">Selected: <strong>{batchSelected.length}</strong> platform sizes</div>
+          {:else}
+            <div class="dim-preview">Output: <strong>{finalW} × {finalH} px</strong></div>
+          {/if}
         </div>
 
         {#if feedback}
@@ -166,10 +249,16 @@
       </div>
 
       <div class="modal-footer">
+        <button class="btn-ghost" onclick={handleExportBrandSizes} disabled={!hasProject || saving} title="Export all 12 social & brand sizes">
+          All Brand Sizes (12)
+        </button>
+        <div style="flex:1;"></div>
         <button class="btn-ghost" onclick={onClose} disabled={saving}>Cancel</button>
-        <button class="btn-primary" onclick={handleSave} disabled={!hasProject || saving}>
+        <button class="btn-primary" onclick={handleSave} disabled={!hasProject || saving || (batchMode && batchSelected.length === 0)}>
           {#if saving}
             Saving…
+          {:else if batchMode}
+            <FolderOpen size={14} strokeWidth={2} /> Batch Export ({batchSelected.length})
           {:else}
             <Download size={14} strokeWidth={2} /> Download / Save File
           {/if}
@@ -201,6 +290,8 @@
   .dim-preview { font-size:12px; color:var(--text-secondary); text-align:center; }
   .dim-preview strong { color:var(--text-primary); }
   .feedback { font-size:12px; color:#34d399; text-align:center; }
+  .batch-toggle { background:transparent; border:1px solid var(--border); color:#38bdf8; font-size:10px; padding:2px 8px; border-radius:4px; cursor:pointer; text-transform:none; letter-spacing:0; }
+  .batch-toggle:hover { background:rgba(56,189,248,0.12); }
   .modal-footer { display:flex; justify-content:flex-end; gap:10px; padding:14px 20px; border-top:1px solid var(--border); }
   .modal-footer .btn-primary { display:flex; align-items:center; gap:7px; }
 </style>

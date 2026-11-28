@@ -5,6 +5,16 @@ use std::sync::{Arc, Mutex};
 
 // ── Data Structures ─────────────────────────────────────────────────────────
 
+fn default_levels_white() -> u8 {
+    255
+}
+fn default_levels_gamma() -> f32 {
+    1.0
+}
+fn default_lut() -> String {
+    "none".to_string()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LayerEffects {
     pub brightness: i32,
@@ -12,6 +22,22 @@ pub struct LayerEffects {
     pub saturation: f32,
     pub blur: f32,
     pub filter: String, // "original" | "grayscale" | "noir" | "warm" | "cool" | "invert"
+    #[serde(default)]
+    pub hue_shift: f32, // -180..180
+    #[serde(default)]
+    pub temperature: f32, // -100..100
+    #[serde(default)]
+    pub sharpness: f32, // 0..100
+    #[serde(default)]
+    pub vignette: f32, // 0..100
+    #[serde(default)]
+    pub levels_black: u8, // 0..250
+    #[serde(default = "default_levels_white")]
+    pub levels_white: u8, // 5..255
+    #[serde(default = "default_levels_gamma")]
+    pub levels_gamma: f32, // 0.2..3.0
+    #[serde(default = "default_lut")]
+    pub lut_preset: String, // "none" | "cinematic" | "cyberpunk" | "vintage" | "moody" | "pastel"
 }
 
 impl Default for LayerEffects {
@@ -22,6 +48,14 @@ impl Default for LayerEffects {
             saturation: 0.0,
             blur: 0.0,
             filter: "original".to_string(),
+            hue_shift: 0.0,
+            temperature: 0.0,
+            sharpness: 0.0,
+            vignette: 0.0,
+            levels_black: 0,
+            levels_white: 255,
+            levels_gamma: 1.0,
+            lut_preset: "none".to_string(),
         }
     }
 }
@@ -1233,7 +1267,155 @@ fn apply_layer_effects(rgba: RgbaImage, fx: &LayerEffects) -> RgbaImage {
         _ => {}
     }
 
-    dyn_img.to_rgba8()
+    // Sharpness (unsharp mask)
+    if fx.sharpness > 0.5 {
+        dyn_img = dyn_img.unsharpen((fx.sharpness / 22.0).clamp(0.2, 5.0), 4);
+    }
+
+    let mut out = dyn_img.to_rgba8();
+
+    // Levels / Gamma LUT
+    let has_levels = fx.levels_black > 0 || fx.levels_white < 255 || (fx.levels_gamma - 1.0).abs() > 0.02;
+    let levels_lut: Option<[u8; 256]> = if has_levels {
+        let b = fx.levels_black.min(250) as f32;
+        let w = fx.levels_white.max(fx.levels_black.saturating_add(5)) as f32;
+        let inv_gamma = 1.0 / fx.levels_gamma.clamp(0.2, 3.0);
+        let mut lut = [0u8; 256];
+        for i in 0..256 {
+            let norm = ((i as f32 - b) / (w - b)).clamp(0.0, 1.0);
+            lut[i] = (norm.powf(inv_gamma) * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+        Some(lut)
+    } else {
+        None
+    };
+
+    let has_temp = fx.temperature.abs() > 0.5;
+    let has_hue = fx.hue_shift.abs() > 0.5;
+    let has_lut = fx.lut_preset != "none" && !fx.lut_preset.is_empty();
+    let has_vig = fx.vignette > 0.5;
+
+    if levels_lut.is_some() || has_temp || has_hue || has_lut || has_vig {
+        let (pw, ph) = (out.width() as f32, out.height() as f32);
+        let cx = pw * 0.5;
+        let cy = ph * 0.5;
+        let max_r = (cx * cx + cy * cy).sqrt().max(1.0);
+        let vig_str = (fx.vignette / 100.0).clamp(0.0, 1.0);
+
+        for (px, py, p) in out.enumerate_pixels_mut() {
+            if p[3] == 0 {
+                continue;
+            }
+            if let Some(ref lut) = levels_lut {
+                p[0] = lut[p[0] as usize];
+                p[1] = lut[p[1] as usize];
+                p[2] = lut[p[2] as usize];
+            }
+            let mut r = p[0] as f32;
+            let mut g = p[1] as f32;
+            let mut b = p[2] as f32;
+
+            if has_temp {
+                let t = fx.temperature * 0.45;
+                r = (r + t).clamp(0.0, 255.0);
+                b = (b - t).clamp(0.0, 255.0);
+            }
+
+            if has_hue {
+                let (h, s, l) = rgb_to_hsl(r / 255.0, g / 255.0, b / 255.0);
+                let nh = (h + fx.hue_shift / 360.0).rem_euclid(1.0);
+                let (nr, ng, nb) = hsl_to_rgb(nh, s, l);
+                r = nr * 255.0;
+                g = ng * 255.0;
+                b = nb * 255.0;
+            }
+
+            if has_lut {
+                let lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
+                match fx.lut_preset.as_str() {
+                    "cinematic" => {
+                        // Teal shadows, warm highlights
+                        r = (r + (lum - 0.35) * 28.0).clamp(0.0, 255.0);
+                        b = (b + (0.55 - lum) * 30.0).clamp(0.0, 255.0);
+                    }
+                    "cyberpunk" => {
+                        r = (r * 1.08 + 12.0).clamp(0.0, 255.0);
+                        g = (g * 0.88).clamp(0.0, 255.0);
+                        b = (b * 1.15 + 18.0).clamp(0.0, 255.0);
+                    }
+                    "vintage" => {
+                        r = (r * 0.92 + 24.0).clamp(0.0, 255.0);
+                        g = (g * 0.88 + 18.0).clamp(0.0, 255.0);
+                        b = (b * 0.78 + 14.0).clamp(0.0, 255.0);
+                    }
+                    "moody" => {
+                        let gray = 0.299 * r + 0.587 * g + 0.114 * b;
+                        r = ((r * 0.75 + gray * 0.25) * 0.92).clamp(0.0, 255.0);
+                        g = ((g * 0.75 + gray * 0.25) * 0.94).clamp(0.0, 255.0);
+                        b = ((b * 0.75 + gray * 0.25) * 1.02).clamp(0.0, 255.0);
+                    }
+                    "pastel" => {
+                        r = (r * 0.82 + 44.0).clamp(0.0, 255.0);
+                        g = (g * 0.82 + 42.0).clamp(0.0, 255.0);
+                        b = (b * 0.82 + 48.0).clamp(0.0, 255.0);
+                    }
+                    _ => {}
+                }
+            }
+
+            if has_vig {
+                let dx = px as f32 - cx;
+                let dy = py as f32 - cy;
+                let dist = (dx * dx + dy * dy).sqrt() / max_r;
+                let falloff = (1.0 - (dist * dist * vig_str * 0.9)).clamp(0.15, 1.0);
+                r *= falloff;
+                g *= falloff;
+                b *= falloff;
+            }
+
+            p[0] = r.round().clamp(0.0, 255.0) as u8;
+            p[1] = g.round().clamp(0.0, 255.0) as u8;
+            p[2] = b.round().clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    out
+}
+
+fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) * 0.5;
+    if (max - min).abs() < 1e-6 {
+        return (0.0, 0.0, l);
+    }
+    let d = max - min;
+    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let h = if (max - r).abs() < 1e-6 {
+        ((g - b) / d + if g < b { 6.0 } else { 0.0 }) / 6.0
+    } else if (max - g).abs() < 1e-6 {
+        ((b - r) / d + 2.0) / 6.0
+    } else {
+        ((r - g) / d + 4.0) / 6.0
+    };
+    (h, s, l)
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    if s <= 1e-6 {
+        return (l, l, l);
+    }
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    let hue2rgb = |mut t: f32| -> f32 {
+        if t < 0.0 { t += 1.0; }
+        if t > 1.0 { t -= 1.0; }
+        if t < 1.0 / 6.0 { return p + (q - p) * 6.0 * t; }
+        if t < 0.5 { return q; }
+        if t < 2.0 / 3.0 { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }
+        p
+    };
+    (hue2rgb(h + 1.0 / 3.0), hue2rgb(h), hue2rgb(h - 1.0 / 3.0))
 }
 
 fn rotate_rgba_bilinear(src: &RgbaImage, deg: f32) -> RgbaImage {
@@ -1364,6 +1546,14 @@ fn composite_layer(
                                 1.0 - 2.0 * (1.0 - s) * (1.0 - d)
                             }
                         }
+                        "difference" => (s - d).abs(),
+                        "exclusion" => s + d - 2.0 * s * d,
+                        "color-dodge" => {
+                            if s >= 0.999 { 1.0 } else { (d / (1.0 - s)).min(1.0) }
+                        }
+                        "color-burn" => {
+                            if s <= 0.001 { 0.0 } else { 1.0 - ((1.0 - d) / s).min(1.0) }
+                        }
                         _ => s,
                     };
                     blended[i] = (out.clamp(0.0, 1.0) * 255.0) as u8;
@@ -1372,7 +1562,6 @@ fn composite_layer(
             blend_pixel_over(dst, [blended[0], blended[1], blended[2], (sa * 255.0) as u8]);
         }
     }
-}
 }
 
 fn blend_pixel_over(dst: &mut Rgba<u8>, src: [u8; 4]) {

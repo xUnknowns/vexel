@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![recursion_limit = "256"]
 
 mod layers;
 mod mcp;
@@ -34,6 +35,11 @@ fn main() {
             tools::save_project_file,
             tools::load_project_file,
             tools::export_configured,
+            tools::export_batch,
+            tools::trim_transparency,
+            tools::save_autosave,
+            tools::check_autosave,
+            tools::clear_autosave,
             tools::get_default_projects_dir,
             tools::get_user_library,
             tools::save_to_user_library,
@@ -92,6 +98,16 @@ fn main() {
             tools::distribute_layers,
             tools::undo_action,
             tools::redo_action,
+            tools::list_project_templates,
+            tools::save_as_template,
+            tools::delete_template,
+            tools::apply_template_to_canvas,
+            tools::add_smart_text_layer,
+            tools::list_brand_sizes,
+            tools::export_all_brand_sizes,
+            tools::get_project_state,
+            tools::get_layer_thumbnails,
+            tools::get_history_info,
             // MCP
             mcp::connect_claude_desktop,
             mcp::check_mcp_real_status,

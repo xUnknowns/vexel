@@ -234,6 +234,22 @@
   let userLibrary = $state([]);
   let librarySearch = $state('');
   let textSearch = $state('');
+  let layerSearch = $state('');
+  let layerThumbnails = $state({});
+  let historyInfo = $state({ undo_count: 0, redo_count: 0 });
+  let snapToPixel = $state(true);
+
+  $effect(() => {
+    const _key = project?.preview_path;
+    if (hasProject && _key) {
+      invoke('get_layer_thumbnails')
+        .then((m) => { if (m) layerThumbnails = m; })
+        .catch(() => {});
+      invoke('get_history_info')
+        .then((h) => { if (h) historyInfo = h; })
+        .catch(() => {});
+    }
+  });
 
   let filteredLibrary = $derived(
     librarySearch.trim()
@@ -248,6 +264,81 @@
   );
 
   let importedFonts = $state([]);
+  let projectTemplates = $state([]);
+  let newTemplateName = $state('');
+  let smartTemplate = $state('{{channel}} — {{title}}');
+  let smartVarsText = $state('channel=Veltrax\ntitle=New Video');
+
+  async function loadProjectTemplates() {
+    try {
+      projectTemplates = await invoke('list_project_templates');
+    } catch (e) {
+      console.error('loadProjectTemplates:', e);
+    }
+  }
+
+  async function saveAsTemplate() {
+    if (!hasProject || !newTemplateName.trim() || isProcessing) return;
+    isProcessing = true;
+    try {
+      await invoke('save_as_template', { name: newTemplateName.trim() });
+      newTemplateName = '';
+      await loadProjectTemplates();
+    } catch (e) {
+      errorMsg = String(e);
+    } finally {
+      isProcessing = false;
+    }
+  }
+
+  async function applyTemplate(tplPath) {
+    if (isProcessing) return;
+    isProcessing = true;
+    try {
+      const resp = await invoke('apply_template_to_canvas', { templatePath: tplPath });
+      syncProject(resp);
+    } catch (e) {
+      errorMsg = String(e);
+    } finally {
+      isProcessing = false;
+    }
+  }
+
+  async function deleteTemplateItem(e, name) {
+    e.stopPropagation();
+    try {
+      await invoke('delete_template', { name });
+      await loadProjectTemplates();
+    } catch (err) {
+      errorMsg = String(err);
+    }
+  }
+
+  async function addSmartText() {
+    if (!hasProject || !smartTemplate.trim() || isProcessing) return;
+    isProcessing = true;
+    try {
+      const vars = {};
+      for (const line of smartVarsText.split('\n')) {
+        const eq = line.indexOf('=');
+        if (eq > 0) {
+          vars[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+        }
+      }
+      const resp = await invoke('add_smart_text_layer', {
+        template: smartTemplate,
+        vars,
+        fontSize: Number(fontSize) || 60,
+        color: textColor,
+      });
+      syncProject(resp);
+      if (resp?.layers?.length) selectedLayerIds = [resp.layers[resp.layers.length - 1].id];
+    } catch (e) {
+      errorMsg = String(e);
+    } finally {
+      isProcessing = false;
+    }
+  }
   let allFontStyles = $derived([
     ...fontStyles,
     ...importedFonts.map((f) => ({ id: f, label: f.replace(/\.(ttf|otf)$/i, '') })),
@@ -298,6 +389,16 @@
   $effect(() => {
     loadUserLibrary();
     loadImportedFonts();
+    loadProjectTemplates();
+  });
+
+  // ── Periodic Autosave (every 45s while project active) ──────────────────
+  $effect(() => {
+    if (!hasProject) return;
+    const id = setInterval(() => {
+      invoke('save_autosave').catch(() => {});
+    }, 45000);
+    return () => clearInterval(id);
   });
 
   async function uploadAndSaveElement() {
@@ -626,6 +727,14 @@
           saturation: Number(patch.saturation ?? fx.saturation),
           blur: Number(patch.blur ?? fx.blur),
           filter: patch.filter ?? fx.filter,
+          hueShift: patch.hue_shift !== undefined ? Number(patch.hue_shift) : null,
+          temperature: patch.temperature !== undefined ? Number(patch.temperature) : null,
+          sharpness: patch.sharpness !== undefined ? Number(patch.sharpness) : null,
+          vignette: patch.vignette !== undefined ? Number(patch.vignette) : null,
+          levelsBlack: patch.levels_black !== undefined ? Number(patch.levels_black) : null,
+          levelsWhite: patch.levels_white !== undefined ? Number(patch.levels_white) : null,
+          levelsGamma: patch.levels_gamma !== undefined ? Number(patch.levels_gamma) : null,
+          lutPreset: patch.lut_preset ?? null,
           recordUndo,
         });
         onProjectUpdate(resp);
@@ -1259,9 +1368,17 @@
               {#if layers.length === 0}
                 <p class="panel-note">No layers yet. Add an image overlay, text, or shape from the left rail.</p>
               {:else}
+                <div class="search-box" style="margin-bottom:6px;">
+                  <Search size={13} strokeWidth={1.75} />
+                  <input type="text" bind:value={layerSearch} placeholder="Filter layers..." />
+                </div>
+                <div style="font-size:10px; color:var(--text-muted); margin-bottom:6px; display:flex; justify-content:space-between;">
+                  <span>History: {historyInfo.undo_count} undo / {historyInfo.redo_count} redo</span>
+                  <span>{layers.length} layers</span>
+                </div>
                 <div class="layer-list">
-                  {#each [...layers].reverse() as l, revIdx}
-                    {@const realIdx = layers.length - 1 - revIdx}
+                  {#each [...layers].reverse().filter((l) => !layerSearch.trim() || l.name.toLowerCase().includes(layerSearch.trim().toLowerCase())) as l}
+                    {@const realIdx = layers.findIndex((x) => x.id === l.id)}
                     <div
                       class="layer-item"
                       class:selected={selectedLayerIds.includes(l.id)}
@@ -1269,6 +1386,9 @@
                       role="button"
                       tabindex="0"
                     >
+                      {#if layerThumbnails[l.id]}
+                        <img src={layerThumbnails[l.id]} alt="" style="width:22px; height:22px; object-fit:contain; border-radius:3px; background:rgba(255,255,255,0.06); flex-shrink:0;" />
+                      {/if}
                       <span class="layer-name">
                         {#if l.group_id}<span class="grp-tag">G</span>{/if}{l.name}
                       </span>
@@ -1437,6 +1557,37 @@
               >
                 <Eraser size={13} strokeWidth={2} /> Remove Background
               </button>
+
+              <div class="divider"></div>
+              <div class="section-title">Project Templates ({projectTemplates.length})</div>
+              <div style="display:flex; gap:6px; margin-bottom:6px;">
+                <input type="text" bind:value={newTemplateName} placeholder="Template name..." style="flex:1;" />
+                <button class="btn-ghost sm" onclick={saveAsTemplate} disabled={!hasProject || !newTemplateName.trim() || isProcessing}>Save</button>
+              </div>
+              {#if projectTemplates.length > 0}
+                <div class="lib-grid">
+                  {#each projectTemplates as tpl}
+                    <div
+                      class="lib-card"
+                      onclick={() => applyTemplate(tpl.file_path)}
+                      title={`Apply ${tpl.name} (${tpl.canvas_width}×${tpl.canvas_height})`}
+                      role="button"
+                      tabindex="0"
+                    >
+                      {#if tpl.preview_path}
+                        <img src={`${convertFileSrc(tpl.preview_path)}?v=1`} alt={tpl.name} loading="lazy" />
+                      {:else}
+                        <span style="font-size:10px; color:#94a3b8; padding:4px;">{tpl.name}</span>
+                      {/if}
+                      <button class="lib-del" onclick={(e) => deleteTemplateItem(e, tpl.name)} title="Delete template">
+                        <X size={10} strokeWidth={2.5} />
+                      </button>
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                <p class="panel-note">Save your current layout as a reusable template.</p>
+              {/if}
             </div>
 
           <!-- ══ TEXT (All Styles + Live Edit) ══ -->
@@ -1540,6 +1691,20 @@
                 </button>
               </div>
               <p class="panel-note">Select any text on the canvas to edit it live in the right Inspector or top bar.</p>
+
+              <div class="divider"></div>
+              <div class="section-title">Smart Text (Variables)</div>
+              <div class="field-block">
+                <label class="field-lbl">Template (use {"{{var}}"})</label>
+                <input type="text" bind:value={smartTemplate} placeholder={"{{channel}} — {{title}}"} />
+              </div>
+              <div class="field-block">
+                <label class="field-lbl">Variables (key=value per line)</label>
+                <textarea class="text-area" bind:value={smartVarsText} rows="2"></textarea>
+              </div>
+              <button class="btn-ghost fw" onclick={addSmartText} disabled={!hasProject || isProcessing || !smartTemplate.trim()}>
+                <Sparkles size={13} strokeWidth={2} /> Add Smart Text
+              </button>
             </div>
 
           <!-- ══ BACKGROUND ══ -->
@@ -1690,6 +1855,9 @@
               <button class="btn-primary fw" onclick={applyCrop} disabled={!hasProject || isProcessing}>
                 <Crop size={14} strokeWidth={2} /> Apply Crop
               </button>
+              <button class="btn-ghost fw" onclick={() => runCmd('trim_transparency', {}, 'Trim Transparency')} disabled={!hasProject || isProcessing}>
+                Trim Transparent Edges
+              </button>
 
               <div class="divider"></div>
               <div class="section-title">Magic Resize (Scale Layers)</div>
@@ -1766,6 +1934,7 @@
         {#if showRulers && hasProject}
           <div
             class="ruler top"
+            style="background-image:repeating-linear-gradient(to right, rgba(148,163,184,0.45) 0 1px, transparent 1px {Math.max(10, 50 * zoom)}px);"
             onclick={(e) => {
               const r = e.currentTarget.getBoundingClientRect();
               addGuide('v', (e.clientX - r.left) / zoom);
@@ -1777,6 +1946,7 @@
           </div>
           <div
             class="ruler left"
+            style="background-image:repeating-linear-gradient(to bottom, rgba(148,163,184,0.45) 0 1px, transparent 1px {Math.max(10, 50 * zoom)}px);"
             onclick={(e) => {
               const r = e.currentTarget.getBoundingClientRect();
               addGuide('h', (e.clientY - r.top) / zoom);
@@ -1938,6 +2108,7 @@
             <button class="zoom-btn" onclick={fitToScreen} title="Fit to screen"><Maximize2 size={11} strokeWidth={2} /></button>
             <button class="zoom-btn" class:active-toggle={showGrid} onclick={() => (showGrid = !showGrid)} title="Toggle Grid"><Grid3x3 size={11} strokeWidth={2} /></button>
             <button class="zoom-btn" class:active-toggle={showRulers} onclick={() => (showRulers = !showRulers)} title="Toggle Rulers &amp; Guides"><Ruler size={11} strokeWidth={2} /></button>
+            <button class="zoom-btn" class:active-toggle={snapToPixel} onclick={() => (snapToPixel = !snapToPixel)} title="Snap to Pixel" style="font-size:9px; padding:0 5px;">px</button>
           </div>
         </div>
       </div>

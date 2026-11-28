@@ -126,6 +126,14 @@
   let fxSaturation = $state(0);
   let fxBlur = $state(0);
   let fxFilter = $state('original');
+  let fxHue = $state(0);
+  let fxTemp = $state(0);
+  let fxSharp = $state(0);
+  let fxVignette = $state(0);
+  let fxLvlBlack = $state(0);
+  let fxLvlWhite = $state(255);
+  let fxLvlGamma = $state(1.0);
+  let fxLut = $state('none');
 
   // Canvas (no selection)
   let cWidth = $state(1280);
@@ -161,6 +169,14 @@
       fxSaturation = selectedLayer.effects?.saturation ?? 0;
       fxBlur = selectedLayer.effects?.blur ?? 0;
       fxFilter = selectedLayer.effects?.filter ?? 'original';
+      fxHue = selectedLayer.effects?.hue_shift ?? 0;
+      fxTemp = selectedLayer.effects?.temperature ?? 0;
+      fxSharp = selectedLayer.effects?.sharpness ?? 0;
+      fxVignette = selectedLayer.effects?.vignette ?? 0;
+      fxLvlBlack = selectedLayer.effects?.levels_black ?? 0;
+      fxLvlWhite = selectedLayer.effects?.levels_white ?? 255;
+      fxLvlGamma = selectedLayer.effects?.levels_gamma ?? 1.0;
+      fxLut = selectedLayer.effects?.lut_preset ?? 'none';
 
       mShape = selectedLayer.mask_shape ?? 'none';
       mRadius = selectedLayer.mask_radius ?? 24;
@@ -396,6 +412,10 @@
               <option value="multiply">Multiply</option>
               <option value="screen">Screen</option>
               <option value="overlay">Overlay</option>
+              <option value="difference">Difference</option>
+              <option value="exclusion">Exclusion</option>
+              <option value="color-dodge">Color Dodge</option>
+              <option value="color-burn">Color Burn</option>
             </select>
           </div>
         {/if}
@@ -885,6 +905,46 @@
           <div class="slider-row">
             <div class="slider-label"><span>Saturation</span><span class="mono">{fxSaturation}</span></div>
             <input type="range" min="-100" max="100" step="1" bind:value={fxSaturation} onpointerdown={onCheckpoint} oninput={() => onLiveEffects({ saturation: fxSaturation }, false)} />
+          </div>
+          <div class="slider-row">
+            <div class="slider-label"><span>Temperature</span><span class="mono">{fxTemp}</span></div>
+            <input type="range" min="-100" max="100" step="1" bind:value={fxTemp} onpointerdown={onCheckpoint} oninput={() => onLiveEffects({ temperature: fxTemp }, false)} />
+          </div>
+          <div class="slider-row">
+            <div class="slider-label"><span>Hue Shift °</span><span class="mono">{fxHue}°</span></div>
+            <input type="range" min="-180" max="180" step="1" bind:value={fxHue} onpointerdown={onCheckpoint} oninput={() => onLiveEffects({ hue_shift: fxHue }, false)} />
+          </div>
+          <div class="slider-row">
+            <div class="slider-label"><span>Sharpness</span><span class="mono">{fxSharp}</span></div>
+            <input type="range" min="0" max="100" step="1" bind:value={fxSharp} onpointerdown={onCheckpoint} oninput={() => onLiveEffects({ sharpness: fxSharp }, false)} />
+          </div>
+          <div class="slider-row">
+            <div class="slider-label"><span>Vignette</span><span class="mono">{fxVignette}%</span></div>
+            <input type="range" min="0" max="100" step="1" bind:value={fxVignette} onpointerdown={onCheckpoint} oninput={() => onLiveEffects({ vignette: fxVignette }, false)} />
+          </div>
+          <div class="mini-lbl">Levels (Black / Gamma / White)</div>
+          <div class="grid-3" style="display:grid; grid-template-columns:repeat(3,1fr); gap:6px;">
+            <ScrubNumber label="Blk" bind:value={fxLvlBlack} min={0} max={240} onScrubStart={onCheckpoint} onLiveChange={(v) => onLiveEffects({ levels_black: v }, false)} onCommit={(v) => onLiveEffects({ levels_black: v }, false)} />
+            <ScrubNumber label="Gam" bind:value={fxLvlGamma} min={0.2} max={3.0} step={0.05} onScrubStart={onCheckpoint} onLiveChange={(v) => onLiveEffects({ levels_gamma: v }, false)} onCommit={(v) => onLiveEffects({ levels_gamma: v }, false)} />
+            <ScrubNumber label="Wht" bind:value={fxLvlWhite} min={15} max={255} onScrubStart={onCheckpoint} onLiveChange={(v) => onLiveEffects({ levels_white: v }, false)} onCommit={(v) => onLiveEffects({ levels_white: v }, false)} />
+          </div>
+          <div class="field-col">
+            <span class="mini-lbl">Color Grading LUT</span>
+            <select
+              class="select-input"
+              value={fxLut}
+              onchange={(e) => {
+                fxLut = e.currentTarget.value;
+                onLiveEffects({ lut_preset: fxLut }, true);
+              }}
+            >
+              <option value="none">None</option>
+              <option value="cinematic">Cinematic (Teal &amp; Orange)</option>
+              <option value="cyberpunk">Cyberpunk (Neon)</option>
+              <option value="vintage">Vintage Film</option>
+              <option value="moody">Moody Matte</option>
+              <option value="pastel">Pastel Lift</option>
+            </select>
           </div>
           <div class="filter-grid">
             {#each filters as f}
