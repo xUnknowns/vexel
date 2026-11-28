@@ -28,6 +28,8 @@
     onLiveGlow,
     onLiveMask,
     onLiveClipToBelow,
+    onAiRemoveBg,
+    onResetAlphaMask,
     onFlip,
     onResizeCanvas,
     onSetCanvasBg,
@@ -445,6 +447,14 @@
             />
             <span>Clip to Layer Below</span>
           </label>
+          <div class="grid-2" style="margin-top:4px;">
+            <button class="btn-primary sm" onclick={() => onAiRemoveBg?.(selectedLayer.id)}>
+              AI Remove BG
+            </button>
+            <button class="btn-ghost sm" onclick={() => onResetAlphaMask?.(selectedLayer.id)} disabled={!selectedLayer.alpha_mask_path}>
+              Reset Mask
+            </button>
+          </div>
         {/if}
       </div>
 

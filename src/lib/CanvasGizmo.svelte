@@ -11,8 +11,12 @@
     showGrid = false,
     gridSize = 40,
     guides = [],
+    canvasTool = 'select', // 'select' | 'wand' | 'lasso' | 'eraser' | 'restore'
+    brushRadius = 24,
     onSelectLayers,
     onDoubleClickText,
+    onStartDragPreview,
+    onApplyDragDom,
     onCommitTransform,
     onCommitMultiTransform,
     onDeleteLayers,
@@ -22,6 +26,9 @@
     onRemoveGuide,
     onUpdateGuide,
     onCropRectChange,
+    onWandClick,
+    onLassoApply,
+    onBrushStroke,
   } = $props();
 
   let selectedLayers = $derived(layers.filter((l) => selectedLayerIds.includes(l.id)));
@@ -38,6 +45,43 @@
   let startGroupBox = { x: 0, y: 0, w: 100, h: 100 };
   let startCrop = { x: 0, y: 0, w: 100, h: 100 };
   let gizmoEl;
+  let selectionBoxEl = $state(null);
+
+  // 60 FPS rAF state (non-reactive for zero Svelte overhead during drag)
+  let rafId = 0;
+  let pendingSingle = null;
+  let pendingSnap = null;
+  let nudgeState = null; // { id, x, y, scale, rotation, w, h, timer }
+
+  // Phase 4: Lasso & Brush overlay state
+  let strokePts = $state([]); // [{ cx, cy }] in canvas coords
+  let lassoPts = $state([]);  // [{ cx, cy }] in canvas coords
+  let lassoReady = $state(false);
+  let cursorCanvasPos = $state(null);
+
+  function canvasCoords(e) {
+    if (!gizmoEl) return { cx: 0, cy: 0 };
+    const rect = gizmoEl.getBoundingClientRect();
+    return {
+      cx: (e.clientX - rect.left) / zoom,
+      cy: (e.clientY - rect.top) / zoom,
+    };
+  }
+
+  function canvasToLayerLocal(cx, cy, layer) {
+    const bw = Math.max(1, layer.bounds_width || 100);
+    const bh = Math.max(1, layer.bounds_height || 100);
+    const sw = bw * layer.scale;
+    const sh = bh * layer.scale;
+    const centerX = layer.x + sw / 2;
+    const centerY = layer.y + sh / 2;
+    const rad = (-layer.rotation * Math.PI) / 180;
+    const dx = cx - centerX;
+    const dy = cy - centerY;
+    const rx = dx * Math.cos(rad) - dy * Math.sin(rad) + sw / 2;
+    const ry = dx * Math.sin(rad) + dy * Math.cos(rad) + sh / 2;
+    return [rx / layer.scale, ry / layer.scale];
+  }
 
   function layerBox(l, useLive = false) {
     const lv = useLive ? liveMap[l.id] : null;
@@ -103,6 +147,9 @@
     mode = 'move';
     startPtr = { x: e.clientX, y: e.clientY };
     snapshotSelection(movable.map((l) => l.id));
+    if (movable.length === 1) {
+      onStartDragPreview?.(movable[0].id);
+    }
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const l of movable) {
@@ -123,6 +170,9 @@
     startPtr = { x: e.clientX, y: e.clientY };
     const movableIds = selectedLayers.filter((l) => !l.locked).map((l) => l.id);
     snapshotSelection(movableIds);
+    if (movableIds.length === 1) {
+      onStartDragPreview?.(movableIds[0]);
+    }
     if (selectionBounds) startGroupBox = { ...selectionBounds };
     e.currentTarget.setPointerCapture?.(e.pointerId);
   }
@@ -134,12 +184,40 @@
     startPtr = { x: e.clientX, y: e.clientY };
     const movableIds = selectedLayers.filter((l) => !l.locked).map((l) => l.id);
     snapshotSelection(movableIds);
+    if (movableIds.length === 1) {
+      onStartDragPreview?.(movableIds[0]);
+    }
     if (selectionBounds) startGroupBox = { ...selectionBounds };
     e.currentTarget.setPointerCapture?.(e.pointerId);
   }
 
   function startMarquee(e) {
-    if (cropMode || e.target !== e.currentTarget || !gizmoEl) return;
+    if (cropMode || !gizmoEl) return;
+    if (canvasTool === 'wand') {
+      if (!primaryLayer) return;
+      const { cx, cy } = canvasCoords(e);
+      const [lx, ly] = canvasToLayerLocal(cx, cy, primaryLayer);
+      onWandClick?.(primaryLayer.id, Math.round(lx), Math.round(ly));
+      return;
+    }
+    if (canvasTool === 'lasso') {
+      if (!primaryLayer) return;
+      const { cx, cy } = canvasCoords(e);
+      mode = 'lasso';
+      lassoReady = false;
+      lassoPts = [{ cx, cy }];
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      return;
+    }
+    if (canvasTool === 'eraser' || canvasTool === 'restore') {
+      if (!primaryLayer) return;
+      const { cx, cy } = canvasCoords(e);
+      mode = 'brush';
+      strokePts = [{ cx, cy }];
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      return;
+    }
+    if (e.target !== e.currentTarget) return;
     const rect = gizmoEl.getBoundingClientRect();
     const cx = (e.clientX - rect.left) / zoom;
     const cy = (e.clientY - rect.top) / zoom;
@@ -239,54 +317,120 @@
       if (Math.abs(ny - gy) <= 4) ny = gy;
     }
 
-    snapGuides = { v: snapV, h: snapH, distLabel };
-    return { nx, ny };
+    return { nx, ny, snap: { v: snapV, h: snapH, distLabel } };
+  }
+
+  function computeSmartSnapSilent(nx, ny, bw, bh) {
+    return computeSmartSnap(nx, ny, bw, bh);
+  }
+
+  function scheduleSingleDomUpdate(id, x, y, scale, rotation, w, h, snap) {
+    pendingSingle = { id, x, y, scale, rotation, w, h };
+    pendingSnap = snap;
+    if (rafId) return;
+    rafId = requestAnimationFrame(() => {
+      rafId = 0;
+      if (!pendingSingle) return;
+      const p = pendingSingle;
+      onApplyDragDom?.(p.x, p.y, p.scale, p.rotation);
+      if (selectionBoxEl) {
+        selectionBoxEl.style.left = `${p.x * zoom}px`;
+        selectionBoxEl.style.top = `${p.y * zoom}px`;
+        selectionBoxEl.style.width = `${Math.max(24, p.w * p.scale) * zoom}px`;
+        selectionBoxEl.style.height = `${Math.max(24, p.h * p.scale) * zoom}px`;
+        selectionBoxEl.style.transform = `rotate(${p.rotation}deg)`;
+      }
+      if (pendingSnap && (pendingSnap.v !== snapGuides.v || pendingSnap.h !== snapGuides.h || pendingSnap.distLabel?.text !== snapGuides.distLabel?.text)) {
+        snapGuides = pendingSnap;
+      }
+    });
   }
 
   function onPointerMove(e) {
+    if ((canvasTool === 'eraser' || canvasTool === 'restore') && gizmoEl) {
+      cursorCanvasPos = canvasCoords(e);
+    } else if (cursorCanvasPos) {
+      cursorCanvasPos = null;
+    }
     if (!mode) return;
     const dx = (e.clientX - startPtr.x) / zoom;
     const dy = (e.clientY - startPtr.y) / zoom;
 
+    if (mode === 'lasso') {
+      const { cx, cy } = canvasCoords(e);
+      const last = lassoPts[lassoPts.length - 1];
+      if (!last || Math.hypot(cx - last.cx, cy - last.cy) >= 3) {
+        lassoPts = [...lassoPts, { cx, cy }];
+      }
+      return;
+    }
+
+    if (mode === 'brush') {
+      const { cx, cy } = canvasCoords(e);
+      const last = strokePts[strokePts.length - 1];
+      if (!last || Math.hypot(cx - last.cx, cy - last.cy) >= 2) {
+        strokePts = [...strokePts, { cx, cy }];
+      }
+      return;
+    }
+
     if (mode === 'move') {
       const rawX = Math.round(startGroupBox.x + dx);
       const rawY = Math.round(startGroupBox.y + dy);
-      const { nx, ny } = computeSmartSnap(rawX, rawY, startGroupBox.w, startGroupBox.h);
+      const { nx, ny, snap } = computeSmartSnapSilent(rawX, rawY, startGroupBox.w, startGroupBox.h);
       const adx = nx - startGroupBox.x;
       const ady = ny - startGroupBox.y;
-      const next = {};
-      for (const [id, st] of Object.entries(startMulti)) {
-        next[id] = { ...st, x: st.x + adx, y: st.y + ady };
+      const entries = Object.entries(startMulti);
+      if (entries.length === 1) {
+        const [id, st] = entries[0];
+        scheduleSingleDomUpdate(id, st.x + adx, st.y + ady, st.scale, st.rotation, st.w, st.h, snap);
+      } else {
+        snapGuides = snap;
+        const next = {};
+        for (const [id, st] of entries) {
+          next[id] = { ...st, x: st.x + adx, y: st.y + ady };
+        }
+        liveMap = next;
       }
-      liveMap = next;
     } else if (mode === 'resize') {
       const delta = Math.max(dx, dy);
       const ratio = Math.max(0.1, Math.min(6.0, (startGroupBox.w + delta) / Math.max(24, startGroupBox.w)));
-      const next = {};
-      for (const [id, st] of Object.entries(startMulti)) {
-        const relX = st.x - startGroupBox.x;
-        const relY = st.y - startGroupBox.y;
-        next[id] = {
-          ...st,
-          x: Math.round(startGroupBox.x + relX * ratio),
-          y: Math.round(startGroupBox.y + relY * ratio),
-          scale: Number(Math.max(0.05, Math.min(8.0, st.scale * ratio)).toFixed(2)),
-        };
+      const entries = Object.entries(startMulti);
+      if (entries.length === 1) {
+        const [id, st] = entries[0];
+        const nextScale = Number(Math.max(0.05, Math.min(8.0, st.scale * ratio)).toFixed(3));
+        scheduleSingleDomUpdate(id, st.x, st.y, nextScale, st.rotation, st.w, st.h, null);
+      } else {
+        const next = {};
+        for (const [id, st] of entries) {
+          const relX = st.x - startGroupBox.x;
+          const relY = st.y - startGroupBox.y;
+          next[id] = {
+            ...st,
+            x: Math.round(startGroupBox.x + relX * ratio),
+            y: Math.round(startGroupBox.y + relY * ratio),
+            scale: Number(Math.max(0.05, Math.min(8.0, st.scale * ratio)).toFixed(2)),
+          };
+        }
+        liveMap = next;
       }
-      liveMap = next;
     } else if (mode === 'rotate' && gizmoEl) {
       const rect = gizmoEl.getBoundingClientRect();
       const boxCx = rect.left + (startGroupBox.x + startGroupBox.w / 2) * zoom;
       const boxCy = rect.top + (startGroupBox.y + startGroupBox.h / 2) * zoom;
       const angle = Math.round(Math.atan2(e.clientY - boxCy, e.clientX - boxCx) * (180 / Math.PI) + 90);
-      const next = {};
-      const ids = Object.keys(startMulti);
-      const baseRot = ids.length === 1 ? startMulti[ids[0]].rotation : 0;
-      const deltaRot = angle - baseRot;
-      for (const [id, st] of Object.entries(startMulti)) {
-        next[id] = { ...st, rotation: ids.length === 1 ? angle : Math.round(st.rotation + deltaRot) };
+      const entries = Object.entries(startMulti);
+      if (entries.length === 1) {
+        const [id, st] = entries[0];
+        scheduleSingleDomUpdate(id, st.x, st.y, st.scale, angle, st.w, st.h, null);
+      } else {
+        const next = {};
+        const deltaRot = angle;
+        for (const [id, st] of entries) {
+          next[id] = { ...st, rotation: Math.round(st.rotation + deltaRot) };
+        }
+        liveMap = next;
       }
-      liveMap = next;
     } else if (mode === 'marquee' && gizmoEl) {
       const rect = gizmoEl.getBoundingClientRect();
       marquee = {
@@ -322,8 +466,30 @@
     if (!mode) return;
     const prevMode = mode;
     mode = null;
+    if (rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+    }
     snapGuides = { v: null, h: null, distLabel: null };
     dragGuideId = null;
+
+    if (prevMode === 'lasso') {
+      if (lassoPts.length >= 3) {
+        lassoReady = true;
+      } else {
+        lassoPts = [];
+      }
+      return;
+    }
+
+    if (prevMode === 'brush') {
+      if (primaryLayer && strokePts.length > 0) {
+        const localPts = strokePts.map((p) => canvasToLayerLocal(p.cx, p.cy, primaryLayer));
+        onBrushStroke?.(primaryLayer.id, localPts, canvasTool === 'eraser');
+      }
+      strokePts = [];
+      return;
+    }
 
     if (prevMode === 'marquee') {
       const mx1 = Math.min(marquee.x1, marquee.x2);
@@ -344,6 +510,13 @@
     }
 
     if (prevMode === 'move' || prevMode === 'resize' || prevMode === 'rotate') {
+      if (pendingSingle) {
+        const p = pendingSingle;
+        pendingSingle = null;
+        onCommitTransform(p.id, p.x, p.y, p.scale, p.rotation);
+        liveMap = {};
+        return;
+      }
       const entries = Object.entries(liveMap);
       if (entries.length === 1) {
         const [id, v] = entries[0];
@@ -382,7 +555,35 @@
       const movable = selectedLayers.filter((l) => !l.locked);
       if (movable.length === 1) {
         const l = movable[0];
-        onCommitTransform(l.id, l.x + dx, l.y + dy, l.scale, l.rotation);
+        if (!nudgeState || nudgeState.id !== l.id) {
+          if (nudgeState?.timer) clearTimeout(nudgeState.timer);
+          nudgeState = {
+            id: l.id,
+            x: l.x + dx,
+            y: l.y + dy,
+            scale: l.scale,
+            rotation: l.rotation,
+            w: l.bounds_width || 120,
+            h: l.bounds_height || 120,
+            timer: null,
+          };
+          onStartDragPreview?.(l.id);
+        } else {
+          nudgeState.x += dx;
+          nudgeState.y += dy;
+          clearTimeout(nudgeState.timer);
+        }
+        onApplyDragDom?.(nudgeState.x, nudgeState.y, nudgeState.scale, nudgeState.rotation);
+        if (selectionBoxEl) {
+          selectionBoxEl.style.left = `${nudgeState.x * zoom}px`;
+          selectionBoxEl.style.top = `${nudgeState.y * zoom}px`;
+        }
+        nudgeState.timer = setTimeout(() => {
+          if (!nudgeState) return;
+          const ns = nudgeState;
+          nudgeState = null;
+          onCommitTransform(ns.id, ns.x, ns.y, ns.scale, ns.rotation);
+        }, 180);
       } else if (movable.length > 1) {
         onCommitMultiTransform(
           movable.map((l) => ({ layer_id: l.id, x: l.x + dx, y: l.y + dy, scale: l.scale, rotation: l.rotation }))
@@ -469,6 +670,7 @@
       {@const allLocked = selectedLayers.every((l) => l.locked)}
       <div
         class="selection-box"
+        bind:this={selectionBoxEl}
         class:locked={allLocked}
         style="
           left:{selectionBounds.x * zoom}px;
@@ -502,6 +704,73 @@
       {@const mw = Math.abs(marquee.x2 - marquee.x1) * zoom}
       {@const mh = Math.abs(marquee.y2 - marquee.y1) * zoom}
       <div class="marquee-box" style="left:{mx}px; top:{my}px; width:{mw}px; height:{mh}px;"></div>
+    {/if}
+
+    <!-- Phase 4: Brush / Eraser Cursor & Live Stroke -->
+    {#if (canvasTool === 'eraser' || canvasTool === 'restore') && cursorCanvasPos && primaryLayer}
+      {@const rPx = brushRadius * primaryLayer.scale * zoom}
+      <div
+        class="brush-cursor"
+        class:restore={canvasTool === 'restore'}
+        style="left:{cursorCanvasPos.cx * zoom}px; top:{cursorCanvasPos.cy * zoom}px; width:{rPx * 2}px; height:{rPx * 2}px;"
+      ></div>
+    {/if}
+    {#if strokePts.length > 1}
+      <svg class="tool-svg" viewBox="0 0 {canvasW} {canvasH}">
+        <polyline
+          points={strokePts.map((p) => `${p.cx},${p.cy}`).join(' ')}
+          fill="none"
+          stroke={canvasTool === 'restore' ? '#34d399' : '#f87171'}
+          stroke-width={brushRadius * 2}
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          stroke-opacity="0.45"
+        />
+      </svg>
+    {/if}
+
+    <!-- Phase 4: Lasso Polygon Overlay -->
+    {#if lassoPts.length > 1}
+      <svg class="tool-svg" viewBox="0 0 {canvasW} {canvasH}">
+        <polygon
+          points={lassoPts.map((p) => `${p.cx},${p.cy}`).join(' ')}
+          fill="rgba(56,189,248,0.18)"
+          stroke="#38bdf8"
+          stroke-width={2 / zoom}
+          stroke-dasharray={`${5 / zoom} ${4 / zoom}`}
+        />
+      </svg>
+      {#if lassoReady && primaryLayer}
+        <div
+          class="lasso-actions"
+          style="left:{lassoPts[0].cx * zoom}px; top:{Math.max(8, lassoPts[0].cy * zoom - 34)}px;"
+          onpointerdown={(e) => e.stopPropagation()}
+          role="presentation"
+        >
+          <button
+            class="lasso-btn danger"
+            onclick={() => {
+              const localPts = lassoPts.map((p) => canvasToLayerLocal(p.cx, p.cy, primaryLayer));
+              lassoPts = [];
+              lassoReady = false;
+              onLassoApply?.(primaryLayer.id, localPts, 'erase_inside');
+            }}
+          >Erase Inside</button>
+          <button
+            class="lasso-btn"
+            onclick={() => {
+              const localPts = lassoPts.map((p) => canvasToLayerLocal(p.cx, p.cy, primaryLayer));
+              lassoPts = [];
+              lassoReady = false;
+              onLassoApply?.(primaryLayer.id, localPts, 'keep_inside');
+            }}
+          >Keep Inside</button>
+          <button
+            class="lasso-btn"
+            onclick={() => { lassoPts = []; lassoReady = false; }}
+          >Cancel</button>
+        </div>
+      {/if}
     {/if}
   {:else}
     <div
@@ -558,4 +827,12 @@
   .crop-box { position:absolute; pointer-events:auto; border:2px solid #38bdf8; box-shadow:0 0 0 9999px rgba(0,0,0,0.58); cursor:move; z-index:40; }
   .crop-grid { position:absolute; inset:0; background-image:linear-gradient(to right, rgba(255,255,255,0.22) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.22) 1px, transparent 1px); background-size:33.33% 33.33%; pointer-events:none; }
   .crop-dims { position:absolute; bottom:-24px; left:0; background:#38bdf8; color:#090b0e; font-size:10px; font-weight:700; padding:2px 7px; border-radius:4px; white-space:nowrap; }
+  .tool-svg { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:36; }
+  .brush-cursor { position:absolute; border:1.5px solid #f87171; border-radius:50%; transform:translate(-50%,-50%); pointer-events:none; z-index:38; box-shadow:0 0 0 1px rgba(0,0,0,0.4); }
+  .brush-cursor.restore { border-color:#34d399; }
+  .lasso-actions { position:absolute; display:flex; gap:4px; background:#0f172a; border:1px solid #38bdf8; border-radius:6px; padding:4px; z-index:45; box-shadow:0 6px 20px rgba(0,0,0,0.5); }
+  .lasso-btn { font-size:11px; font-weight:600; padding:3px 8px; border-radius:4px; border:none; background:#1e293b; color:#e2e8f0; cursor:pointer; }
+  .lasso-btn:hover { background:#334155; }
+  .lasso-btn.danger { background:rgba(239,68,68,0.2); color:#fca5a5; }
+  .lasso-btn.danger:hover { background:rgba(239,68,68,0.35); }
 </style>

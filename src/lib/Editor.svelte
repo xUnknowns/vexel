@@ -8,7 +8,8 @@
     Lock, Unlock, Copy, Trash2, ArrowUp, ArrowDown,
     ImagePlus, Eraser, AlignCenterHorizontal, AlignCenterVertical,
     Stamp, Search, FlipHorizontal, FlipVertical, Upload, X,
-    Grid3x3, Ruler, FolderPlus, Ungroup
+    Grid3x3, Ruler, FolderPlus, Ungroup,
+    MousePointer2, Wand2, Lasso, Paintbrush
   } from 'lucide-svelte';
   import ExportModal from './ExportModal.svelte';
   import CanvasGizmo from './CanvasGizmo.svelte';
@@ -35,6 +36,18 @@
   let zoom = $state(1.0);
   let canvasArea;
   let textInputEl;
+
+  // ── 60 FPS Live Drag Preview & Phase 4 Canvas Tools ─────────────────────
+  let dragPreview = $state(null); // { layerId, belowUrl, layerUrl, aboveUrl, w, h, padLeft, padTop, opacity, blendMode, x, y, scale, rotation }
+  let dragLayerImgEl = $state(null);
+  let dragPreviewSeq = 0;
+  let pendingClearDrag = false;
+
+  let canvasTool = $state('select'); // 'select' | 'wand' | 'lasso' | 'eraser' | 'restore'
+  let wandTolerance = $state(32);
+  let wandContiguous = $state(true);
+  let brushRadius = $state(24);
+  let brushSoftness = $state(0.35);
 
   // ── Phase 2: Grid, Rulers, Guides & Clipboard ────────────────────────────
   let showGrid = $state(false);
@@ -972,10 +985,61 @@
     setTimeout(() => textInputEl?.focus(), 60);
   }
 
-  function commitGizmoTransform(layerId, nx, ny, nscale, nrot) {
+  async function startDragPreview(layerId) {
+    const seq = ++dragPreviewSeq;
+    pendingClearDrag = false;
+    try {
+      const r = await invoke('render_drag_layers', { layerId });
+      if (seq !== dragPreviewSeq) return;
+      dragPreview = {
+        layerId,
+        belowUrl: `${convertFileSrc(r.below_path)}?v=${seq}`,
+        layerUrl: `${convertFileSrc(r.layer_path)}?v=${seq}`,
+        aboveUrl: r.above_path ? `${convertFileSrc(r.above_path)}?v=${seq}` : null,
+        w: r.layer_w,
+        h: r.layer_h,
+        padLeft: r.pad_left,
+        padTop: r.pad_top,
+        opacity: r.opacity,
+        blendMode: r.blend_mode || 'normal',
+        x: r.layer_x,
+        y: r.layer_y,
+        scale: r.scale,
+        rotation: r.rotation,
+      };
+    } catch (e) {
+      console.error('render_drag_layers:', e);
+    }
+  }
+
+  function dragLayerTransformCss(p, x, y, scale, rotation) {
+    const tx = (x - p.padLeft + (p.w * scale - p.w) / 2) * zoom;
+    const ty = (y - p.padTop + (p.h * scale - p.h) / 2) * zoom;
+    return `translate3d(${tx}px, ${ty}px, 0) rotate(${rotation}deg) scale(${scale})`;
+  }
+
+  function applyDragDom(x, y, scale, rotation) {
+    if (!dragPreview) return;
+    dragPreview.x = x;
+    dragPreview.y = y;
+    dragPreview.scale = scale;
+    dragPreview.rotation = rotation;
+    if (dragLayerImgEl) {
+      dragLayerImgEl.style.transform = dragLayerTransformCss(dragPreview, x, y, scale, rotation);
+    }
+  }
+
+  async function commitGizmoTransform(layerId, nx, ny, nscale, nrot) {
+    dragPreviewSeq++;
     const l = layers.find((item) => item.id === layerId);
-    if (!l) return;
-    runCmd(
+    if (!l) {
+      dragPreview = null;
+      return;
+    }
+    if (dragPreview) {
+      pendingClearDrag = true;
+    }
+    const resp = await runCmd(
       'update_layer_transform',
       {
         layerId,
@@ -988,6 +1052,40 @@
       },
       'Transform Layer'
     );
+    if (!resp) {
+      dragPreview = null;
+      pendingClearDrag = false;
+    }
+  }
+
+  async function handleWandClick(layerId, lx, ly) {
+    await runCmd(
+      'magic_wand_mask',
+      { layerId, x: lx, y: ly, tolerance: wandTolerance, erase: true, contiguous: wandContiguous },
+      'Magic Wand Erase'
+    );
+  }
+
+  async function handleLassoApply(layerId, points, mode) {
+    await runCmd('lasso_mask', { layerId, points, mode }, mode === 'erase_inside' ? 'Lasso Erase' : 'Lasso Keep');
+  }
+
+  async function handleBrushStroke(layerId, points, erase) {
+    await runCmd(
+      'brush_mask_stroke',
+      { layerId, points, radius: brushRadius, softness: brushSoftness, erase, recordUndo: true },
+      erase ? 'Eraser Stroke' : 'Restore Stroke'
+    );
+  }
+
+  async function handleAiRemoveBg(layerId) {
+    if (!layerId) return;
+    await runCmd('ai_remove_background', { layerId }, 'AI Remove Background');
+  }
+
+  async function handleResetAlphaMask(layerId) {
+    if (!layerId) return;
+    await runCmd('reset_alpha_mask', { layerId }, 'Reset Alpha Mask');
   }
 
   function commitTransform() {
@@ -1701,7 +1799,51 @@
               height={canvasH * zoom}
               style="display:block; width:100%; height:100%; object-fit:fill; pointer-events:none;"
               draggable="false"
+              onload={() => {
+                if (pendingClearDrag) {
+                  dragPreview = null;
+                  pendingClearDrag = false;
+                }
+              }}
             />
+
+            {#if dragPreview}
+              <div class="drag-preview-stack" style="position:absolute; inset:0; pointer-events:none; overflow:hidden;">
+                <img
+                  src={dragPreview.belowUrl}
+                  alt=""
+                  style="position:absolute; inset:0; width:100%; height:100%; object-fit:fill; pointer-events:none;"
+                  draggable="false"
+                />
+                <img
+                  bind:this={dragLayerImgEl}
+                  src={dragPreview.layerUrl}
+                  alt=""
+                  style="
+                    position:absolute;
+                    left:0;
+                    top:0;
+                    width:{(dragPreview.w + dragPreview.padLeft * 2) * zoom}px;
+                    height:{(dragPreview.h + dragPreview.padTop * 2) * zoom}px;
+                    opacity:{dragPreview.opacity};
+                    mix-blend-mode:{dragPreview.blendMode};
+                    transform-origin:center center;
+                    will-change:transform;
+                    transform:{dragLayerTransformCss(dragPreview, dragPreview.x, dragPreview.y, dragPreview.scale, dragPreview.rotation)};
+                    pointer-events:none;
+                  "
+                  draggable="false"
+                />
+                {#if dragPreview.aboveUrl}
+                  <img
+                    src={dragPreview.aboveUrl}
+                    alt=""
+                    style="position:absolute; inset:0; width:100%; height:100%; object-fit:fill; pointer-events:none;"
+                    draggable="false"
+                  />
+                {/if}
+              </div>
+            {/if}
 
           <CanvasGizmo
             {layers}
@@ -1714,8 +1856,12 @@
             {cropAspect}
             {showGrid}
             {guides}
+            {canvasTool}
+            {brushRadius}
             onSelectLayers={(ids) => (selectedLayerIds = ids)}
             onDoubleClickText={handleDoubleClickText}
+            onStartDragPreview={startDragPreview}
+            onApplyDragDom={applyDragDom}
             onCommitTransform={commitGizmoTransform}
             onCommitMultiTransform={(updates) => runCmd('transform_layers', { updates }, 'Transform Layers')}
             onDeleteLayers={(ids) => runCmd('delete_layers', { layerIds: ids }, 'Delete Layers')}
@@ -1725,6 +1871,9 @@
             onRemoveGuide={(id) => (guides = guides.filter((g) => g.id !== id))}
             onUpdateGuide={(id, pos) => (guides = guides.map((g) => (g.id === id ? { ...g, pos } : g)))}
             onCropRectChange={(r) => (cropRect = r)}
+            onWandClick={handleWandClick}
+            onLassoApply={handleLassoApply}
+            onBrushStroke={handleBrushStroke}
           />
 
           {#if isProcessing}
@@ -1745,6 +1894,37 @@
           {layers.length} layers · {project?.undo_count ?? 0} undo
           {#if errorMsg}<span class="err-dot" title={errorMsg}>!</span>{:else}· {statusMsg}{/if}
         </span>
+        {#if hasProject}
+          <div class="canvas-tools-strip">
+            <button class="zoom-btn" class:active-toggle={canvasTool === 'select'} onclick={() => (canvasTool = 'select')} title="Select / Move">
+              <MousePointer2 size={11} strokeWidth={2} />
+            </button>
+            <button class="zoom-btn" class:active-toggle={canvasTool === 'wand'} onclick={() => (canvasTool = 'wand')} title="Magic Wand (Select Layer First)">
+              <Wand2 size={11} strokeWidth={2} />
+            </button>
+            <button class="zoom-btn" class:active-toggle={canvasTool === 'lasso'} onclick={() => (canvasTool = 'lasso')} title="Lasso Selection">
+              <Lasso size={11} strokeWidth={2} />
+            </button>
+            <button class="zoom-btn" class:active-toggle={canvasTool === 'eraser'} onclick={() => (canvasTool = 'eraser')} title="Eraser Brush">
+              <Eraser size={11} strokeWidth={2} />
+            </button>
+            <button class="zoom-btn" class:active-toggle={canvasTool === 'restore'} onclick={() => (canvasTool = 'restore')} title="Restore Brush">
+              <Paintbrush size={11} strokeWidth={2} />
+            </button>
+            {#if canvasTool === 'wand'}
+              <span class="tool-param">Tol <input type="number" min="1" max="150" bind:value={wandTolerance} style="width:42px;" /></span>
+              <label class="tool-param"><input type="checkbox" bind:checked={wandContiguous} /> Contig</label>
+            {:else if canvasTool === 'eraser' || canvasTool === 'restore'}
+              <span class="tool-param">Size <input type="number" min="2" max="150" bind:value={brushRadius} style="width:42px;" /></span>
+              <span class="tool-param">Soft <input type="range" min="0" max="1" step="0.05" bind:value={brushSoftness} style="width:48px;" /></span>
+            {/if}
+            {#if selectedLayer}
+              <button class="zoom-btn" onclick={() => handleAiRemoveBg(selectedLayer.id)} disabled={isProcessing} title="AI Remove Background (U2-Net)">
+                <Sparkles size={11} strokeWidth={2} /> AI BG
+              </button>
+            {/if}
+          </div>
+        {/if}
           <div class="zoom-controls">
             <button class="zoom-btn" onclick={() => (zoom = Math.max(0.05, zoom - 0.1))}>−</button>
             <input
@@ -1784,6 +1964,8 @@
       onLiveGlow={liveUpdateGlow}
       onLiveMask={liveUpdateMask}
       onLiveClipToBelow={liveUpdateClipToBelow}
+      onAiRemoveBg={handleAiRemoveBg}
+      onResetAlphaMask={handleResetAlphaMask}
       onFlip={(id, horizontal) => runCmd('flip_layer', { layerId: id, horizontal }, horizontal ? 'Flip H' : 'Flip V')}
       onResizeCanvas={(w, h) => runCmd('resize_canvas', { width: w, height: h, scaleLayers: true }, 'Resize Canvas')}
       onSetCanvasBg={(opts) => runCmd('set_canvas_background', opts, 'Set Canvas BG')}
@@ -1936,6 +2118,9 @@
   .step-pill { font-size:12px; color:var(--text-secondary); display:flex; align-items:center; gap:6px; white-space:nowrap; }
   .err-dot { color:#f87171; font-weight:700; }
   .zoom-controls { display:flex; align-items:center; gap:5px; }
+  .canvas-tools-strip { display:flex; align-items:center; gap:4px; padding:0 8px; border-left:1px solid var(--border); border-right:1px solid var(--border); }
+  .tool-param { display:flex; align-items:center; gap:4px; font-size:11px; color:var(--text-secondary); margin-left:4px; }
+  .tool-param input[type="number"] { padding:2px 4px; font-size:11px; height:22px; }
   .zoom-btn { width:22px; height:22px; display:grid; place-items:center; border-radius:50%; background:var(--bg-card-hover); border:1px solid var(--border); color:var(--text-secondary); font-size:14px; line-height:1; padding:0; }
   .zoom-pct { font-size:12px; font-variant-numeric:tabular-nums; color:var(--text-primary); min-width:34px; text-align:center; }
 </style>

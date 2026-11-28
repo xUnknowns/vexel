@@ -19,3 +19,4 @@ ab_glyph        = "0.2"
 tiny_http       = "0.12"
 ureq            = { version = "2.10", features = ["json"] }
 base64          = "0.22"
+tract-onnx      = "0.21"

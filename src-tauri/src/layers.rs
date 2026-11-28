@@ -201,6 +201,8 @@ pub struct Layer {
     pub mask_shape: Option<String>, // None | "circle" | "rounded" | "star"
     #[serde(default)]
     pub mask_radius: u32,
+    #[serde(default)]
+    pub alpha_mask_path: Option<String>,
     pub kind: LayerKind,
 }
 
@@ -459,6 +461,10 @@ pub fn render_project_composite(
             continue;
         }
 
+        if let Some(ref mask_path) = layer.alpha_mask_path {
+            layer_img = apply_alpha_mask_file(&layer_img, mask_path);
+        }
+
         if let Some(ref mask_kind) = layer.mask_shape {
             layer_img = apply_shape_mask(&layer_img, mask_kind, layer.mask_radius);
         }
@@ -569,7 +575,7 @@ pub fn render_project_composite(
     Ok(dyn_img)
 }
 
-fn render_layer_kind(kind: &LayerKind) -> Result<RgbaImage, String> {
+pub fn render_layer_kind(kind: &LayerKind) -> Result<RgbaImage, String> {
     match kind {
         LayerKind::Image {
             source_path,
@@ -916,7 +922,7 @@ fn draw_text_pass(
     }
 }
 
-fn point_in_polygon(px: f32, py: f32, verts: &[(f32, f32)]) -> bool {
+pub fn point_in_polygon(px: f32, py: f32, verts: &[(f32, f32)]) -> bool {
     let mut inside = false;
     let n = verts.len();
     let mut j = n.saturating_sub(1);
@@ -1367,6 +1373,7 @@ fn composite_layer(
         }
     }
 }
+}
 
 fn blend_pixel_over(dst: &mut Rgba<u8>, src: [u8; 4]) {
     let sa = src[3] as f32 / 255.0;
@@ -1565,4 +1572,300 @@ fn composite_layer_clipped(
             blend_pixel_over(dst, [blended[0], blended[1], blended[2], (sa * 255.0) as u8]);
         }
     }
+}
+
+pub fn apply_alpha_mask_file(src: &RgbaImage, mask_path: &str) -> RgbaImage {
+    let Ok(mask_dyn) = image::open(mask_path) else {
+        return src.clone();
+    };
+    let (w, h) = (src.width(), src.height());
+    let mask_luma = if mask_dyn.width() == w && mask_dyn.height() == h {
+        mask_dyn.to_luma8()
+    } else {
+        mask_dyn
+            .resize_exact(w, h, FilterType::Triangle)
+            .to_luma8()
+    };
+    let mut out = src.clone();
+    for y in 0..h {
+        for x in 0..w {
+            let m = mask_luma.get_pixel(x, y)[0] as u16;
+            let p = out.get_pixel_mut(x, y);
+            p[3] = ((p[3] as u16 * m) / 255) as u8;
+        }
+    }
+    out
+}
+
+#[derive(serde::Serialize)]
+pub struct DragLayersPreview {
+    pub below_path: String,
+    pub layer_path: String,
+    pub above_path: Option<String>,
+    pub layer_x: i64,
+    pub layer_y: i64,
+    pub layer_w: u32,
+    pub layer_h: u32,
+    pub pad_left: i64,
+    pub pad_top: i64,
+    pub scale: f32,
+    pub rotation: f32,
+    pub opacity: f32,
+    pub blend_mode: String,
+}
+
+fn render_layer_into_canvas(
+    canvas: &mut RgbaImage,
+    layer: &mut Layer,
+    groups_ref: &[LayerGroup],
+    prev_canvas_alpha: &mut Option<Vec<u8>>,
+    cw: u32,
+    ch: u32,
+) {
+    let Ok(mut layer_img) = render_layer_kind(&layer.kind) else {
+        return;
+    };
+    layer.bounds_width = layer_img.width();
+    layer.bounds_height = layer_img.height();
+
+    if !layer.visible || !is_group_visible(layer.group_id.as_deref(), groups_ref) || layer.opacity <= 0.001 {
+        return;
+    }
+
+    if let Some(ref mask_path) = layer.alpha_mask_path {
+        layer_img = apply_alpha_mask_file(&layer_img, mask_path);
+    }
+    if let Some(ref mask_kind) = layer.mask_shape {
+        layer_img = apply_shape_mask(&layer_img, mask_kind, layer.mask_radius);
+    }
+    layer_img = apply_layer_effects(layer_img, &layer.effects);
+
+    if (layer.scale - 1.0).abs() > 0.01 {
+        let nw = ((layer_img.width() as f32 * layer.scale).round() as u32).max(1);
+        let nh = ((layer_img.height() as f32 * layer.scale).round() as u32).max(1);
+        layer_img = DynamicImage::ImageRgba8(layer_img)
+            .resize_exact(nw, nh, FilterType::Lanczos3)
+            .to_rgba8();
+    }
+    if layer.rotation.abs() > 0.1 {
+        layer_img = rotate_rgba_bilinear(&layer_img, layer.rotation);
+    }
+    if layer.flip_h {
+        layer_img = image::imageops::flip_horizontal(&layer_img);
+    }
+    if layer.flip_v {
+        layer_img = image::imageops::flip_vertical(&layer_img);
+    }
+    if layer.inner_glow.enabled && layer.inner_glow.intensity > 0.5 {
+        layer_img = apply_inner_glow(&layer_img, layer.inner_glow.color, layer.inner_glow.intensity);
+    }
+
+    let mut draw_x = layer.x;
+    let mut draw_y = layer.y;
+
+    if layer.outline.enabled && layer.outline.thickness > 0 {
+        let t = layer.outline.thickness.min(24) as i64;
+        layer_img = apply_outline(&layer_img, layer.outline.color, layer.outline.thickness);
+        draw_x -= t;
+        draw_y -= t;
+    }
+    if layer.outer_glow.enabled && layer.outer_glow.intensity > 0.5 {
+        let pad = (layer.outer_glow.intensity.ceil() as i64).min(40);
+        layer_img = apply_outer_glow(&layer_img, layer.outer_glow.color, layer.outer_glow.intensity);
+        draw_x -= pad;
+        draw_y -= pad;
+    }
+    if layer.shadow.enabled && layer.shadow.opacity > 0.01 {
+        let (sh_img, off_x, off_y) = apply_drop_shadow(&layer_img, &layer.shadow);
+        layer_img = sh_img;
+        draw_x -= off_x;
+        draw_y -= off_y;
+    }
+
+    if layer.clip_to_below {
+        if let Some(ref mask_alpha) = prev_canvas_alpha {
+            composite_layer_clipped(
+                canvas,
+                &layer_img,
+                draw_x,
+                draw_y,
+                layer.opacity.clamp(0.0, 1.0),
+                &layer.blend_mode,
+                mask_alpha,
+            );
+            return;
+        }
+    }
+
+    let mut alpha_map = vec![0u8; (cw * ch) as usize];
+    for ly in 0..layer_img.height() as i64 {
+        let cy = draw_y + ly;
+        if cy < 0 || cy >= ch as i64 {
+            continue;
+        }
+        for lx in 0..layer_img.width() as i64 {
+            let cx = draw_x + lx;
+            if cx < 0 || cx >= cw as i64 {
+                continue;
+            }
+            alpha_map[(cy as u32 * cw + cx as u32) as usize] =
+                layer_img.get_pixel(lx as u32, ly as u32)[3];
+        }
+    }
+    *prev_canvas_alpha = Some(alpha_map);
+
+    composite_layer(
+        canvas,
+        &layer_img,
+        draw_x,
+        draw_y,
+        layer.opacity.clamp(0.0, 1.0),
+        &layer.blend_mode,
+    );
+}
+
+/// Renders 3 split PNGs for 60 FPS GPU-accelerated drag/scale/rotate preview.
+pub fn render_drag_split(
+    snapshot: &mut ProjectSnapshot,
+    target_layer_id: &str,
+    below_dest: &str,
+    layer_dest: &str,
+    above_dest: &str,
+) -> Result<DragLayersPreview, String> {
+    let cw = snapshot.canvas_width.max(1);
+    let ch = snapshot.canvas_height.max(1);
+
+    let mut below_canvas = if snapshot.transparent_bg {
+        RgbaImage::from_pixel(cw, ch, Rgba([0, 0, 0, 0]))
+    } else if let Some(ref grad) = snapshot.bg_gradient {
+        render_gradient_image(cw, ch, grad.from_color, grad.to_color, grad.angle)
+    } else {
+        RgbaImage::from_pixel(cw, ch, Rgba(snapshot.bg_color))
+    };
+    let mut above_canvas = RgbaImage::from_pixel(cw, ch, Rgba([0, 0, 0, 0]));
+
+    let groups_ref = snapshot.groups.clone();
+    let mut prev_canvas_alpha: Option<Vec<u8>> = None;
+    let mut found_target = false;
+    let mut has_above = false;
+    let mut target_preview: Option<(RgbaImage, i64, i64, u32, u32, i64, i64, f32, f32, f32, String)> = None;
+
+    for layer in &mut snapshot.layers {
+        if layer.id == target_layer_id {
+            found_target = true;
+            let mut layer_img = render_layer_kind(&layer.kind)?;
+            let base_w = layer_img.width();
+            let base_h = layer_img.height();
+            layer.bounds_width = base_w;
+            layer.bounds_height = base_h;
+
+            if let Some(ref mask_path) = layer.alpha_mask_path {
+                layer_img = apply_alpha_mask_file(&layer_img, mask_path);
+            }
+            if let Some(ref mask_kind) = layer.mask_shape {
+                layer_img = apply_shape_mask(&layer_img, mask_kind, layer.mask_radius);
+            }
+            layer_img = apply_layer_effects(layer_img, &layer.effects);
+            if layer.flip_h {
+                layer_img = image::imageops::flip_horizontal(&layer_img);
+            }
+            if layer.flip_v {
+                layer_img = image::imageops::flip_vertical(&layer_img);
+            }
+            if layer.inner_glow.enabled && layer.inner_glow.intensity > 0.5 {
+                layer_img = apply_inner_glow(&layer_img, layer.inner_glow.color, layer.inner_glow.intensity);
+            }
+            let mut pad_left = 0i64;
+            let mut pad_top = 0i64;
+            if layer.outline.enabled && layer.outline.thickness > 0 {
+                let t = layer.outline.thickness.min(24) as i64;
+                layer_img = apply_outline(&layer_img, layer.outline.color, layer.outline.thickness);
+                pad_left += t;
+                pad_top += t;
+            }
+            if layer.outer_glow.enabled && layer.outer_glow.intensity > 0.5 {
+                let pad = (layer.outer_glow.intensity.ceil() as i64).min(40);
+                layer_img = apply_outer_glow(&layer_img, layer.outer_glow.color, layer.outer_glow.intensity);
+                pad_left += pad;
+                pad_top += pad;
+            }
+            if layer.shadow.enabled && layer.shadow.opacity > 0.01 {
+                let (sh_img, off_x, off_y) = apply_drop_shadow(&layer_img, &layer.shadow);
+                layer_img = sh_img;
+                pad_left += off_x;
+                pad_top += off_y;
+            }
+            target_preview = Some((
+                layer_img,
+                layer.x,
+                layer.y,
+                base_w,
+                base_h,
+                pad_left,
+                pad_top,
+                layer.scale,
+                layer.rotation,
+                layer.opacity.clamp(0.0, 1.0),
+                layer.blend_mode.clone(),
+            ));
+            continue;
+        }
+
+        if !found_target {
+            render_layer_into_canvas(
+                &mut below_canvas,
+                layer,
+                &groups_ref,
+                &mut prev_canvas_alpha,
+                cw,
+                ch,
+            );
+        } else {
+            if layer.visible && is_group_visible(layer.group_id.as_deref(), &groups_ref) && layer.opacity > 0.001 {
+                has_above = true;
+            }
+            render_layer_into_canvas(
+                &mut above_canvas,
+                layer,
+                &groups_ref,
+                &mut prev_canvas_alpha,
+                cw,
+                ch,
+            );
+        }
+    }
+
+    let (layer_img, layer_x, layer_y, layer_w, layer_h, pad_left, pad_top, scale, rotation, opacity, blend_mode) =
+        target_preview.ok_or_else(|| format!("Layer '{}' not found.", target_layer_id))?;
+
+    DynamicImage::ImageRgba8(below_canvas)
+        .save(below_dest)
+        .map_err(|e| format!("Failed to save drag below: {}", e))?;
+    DynamicImage::ImageRgba8(layer_img)
+        .save(layer_dest)
+        .map_err(|e| format!("Failed to save drag layer: {}", e))?;
+    let above_path = if has_above {
+        DynamicImage::ImageRgba8(above_canvas)
+            .save(above_dest)
+            .map_err(|e| format!("Failed to save drag above: {}", e))?;
+        Some(above_dest.to_string())
+    } else {
+        None
+    };
+
+    Ok(DragLayersPreview {
+        below_path: below_dest.to_string(),
+        layer_path: layer_dest.to_string(),
+        above_path,
+        layer_x,
+        layer_y,
+        layer_w,
+        layer_h,
+        pad_left,
+        pad_top,
+        scale,
+        rotation,
+        opacity,
+        blend_mode,
+    })
 }

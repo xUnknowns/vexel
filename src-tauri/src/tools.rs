@@ -1,5 +1,6 @@
 use crate::layers::{
-    parse_hex_color, render_project_composite, BgGradient, DropShadow, GlowEffect, Layer,
+    parse_hex_color, point_in_polygon, render_drag_split, render_layer_kind,
+    render_project_composite, BgGradient, DragLayersPreview, DropShadow, GlowEffect, Layer,
     LayerEffects, LayerGroup, LayerKind, LayerOutline, ProjectResponse, ProjectSnapshot,
     ProjectState, SharedProjectState,
 };
@@ -171,6 +172,14 @@ pub fn open_base_image(
             group_id: None,
             effects: LayerEffects::default(),
             outline: LayerOutline::default(),
+            group_id: None,
+            shadow: DropShadow::default(),
+            outer_glow: GlowEffect::default(),
+            inner_glow: GlowEffect::default(),
+            clip_to_below: false,
+            mask_shape: None,
+            mask_radius: 0,
+            alpha_mask_path: None,
             kind: LayerKind::Image {
                 source_path: image_path,
                 bg_remove_color: None,
@@ -222,6 +231,13 @@ pub fn add_image_overlay_layer(
         group_id: None,
         effects: LayerEffects::default(),
         outline: LayerOutline::default(),
+        shadow: DropShadow::default(),
+        outer_glow: GlowEffect::default(),
+        inner_glow: GlowEffect::default(),
+        clip_to_below: false,
+        mask_shape: None,
+        mask_radius: 0,
+        alpha_mask_path: None,
         kind: LayerKind::Image {
             source_path: image_path,
             bg_remove_color: None,
@@ -309,6 +325,13 @@ pub fn add_text_layer(
         group_id: None,
         effects: LayerEffects::default(),
         outline: LayerOutline::default(),
+        shadow: DropShadow::default(),
+        outer_glow: GlowEffect::default(),
+        inner_glow: GlowEffect::default(),
+        clip_to_below: false,
+        mask_shape: None,
+        mask_radius: 0,
+        alpha_mask_path: None,
         kind: LayerKind::Text3D {
             content,
             font_style,
@@ -323,6 +346,10 @@ pub fn add_text_layer(
             align: align.unwrap_or_else(|| "left".to_string()),
             line_height: line_height.unwrap_or(1.2),
             letter_spacing: letter_spacing.unwrap_or(0.0),
+            underline: false,
+            gradient_colors: None,
+            gradient_angle: 90.0,
+            curve_amount: 0.0,
         },
     });
     render_and_respond(&mut s)
@@ -613,6 +640,13 @@ pub fn add_shape_layer(
         group_id: None,
         effects: LayerEffects::default(),
         outline: LayerOutline::default(),
+        shadow: DropShadow::default(),
+        outer_glow: GlowEffect::default(),
+        inner_glow: GlowEffect::default(),
+        clip_to_below: false,
+        mask_shape: None,
+        mask_radius: 0,
+        alpha_mask_path: None,
         kind: LayerKind::Shape {
             shape_type,
             width: width.max(4),
@@ -621,6 +655,9 @@ pub fn add_shape_layer(
             border_radius,
             border_color: border_hex.as_deref().map(parse_hex_color).unwrap_or([0, 0, 0, 0]),
             border_width: border_width.unwrap_or(0),
+            sides: 5,
+            corner_radii: None,
+            fill_gradient: None,
         },
     });
     render_and_respond(&mut s)
@@ -660,6 +697,13 @@ pub fn add_gradient_layer(
         group_id: None,
         effects: LayerEffects::default(),
         outline: LayerOutline::default(),
+        shadow: DropShadow::default(),
+        outer_glow: GlowEffect::default(),
+        inner_glow: GlowEffect::default(),
+        clip_to_below: false,
+        mask_shape: None,
+        mask_radius: 0,
+        alpha_mask_path: None,
         kind: LayerKind::Gradient {
             width: width.max(4),
             height: height.max(4),
@@ -712,6 +756,13 @@ pub fn add_watermark_layer(
         group_id: None,
         effects: LayerEffects::default(),
         outline: LayerOutline::default(),
+        shadow: DropShadow::default(),
+        outer_glow: GlowEffect::default(),
+        inner_glow: GlowEffect::default(),
+        clip_to_below: false,
+        mask_shape: None,
+        mask_radius: 0,
+        alpha_mask_path: None,
         kind: LayerKind::Watermark {
             text,
             font_style: font,
@@ -1457,6 +1508,13 @@ pub fn add_image_bytes_layer(
         group_id: None,
         effects: LayerEffects::default(),
         outline: LayerOutline::default(),
+        shadow: DropShadow::default(),
+        outer_glow: GlowEffect::default(),
+        inner_glow: GlowEffect::default(),
+        clip_to_below: false,
+        mask_shape: None,
+        mask_radius: 0,
+        alpha_mask_path: None,
         kind: LayerKind::Image {
             source_path: dest.to_string_lossy().to_string(),
             bg_remove_color: None,
@@ -1905,6 +1963,7 @@ pub fn add_shape_advanced(
         clip_to_below: false,
         mask_shape: None,
         mask_radius: 0,
+        alpha_mask_path: None,
         kind: LayerKind::Shape {
             shape_type: shape_type.clone(),
             width,
@@ -1926,6 +1985,363 @@ fn uuid_v4() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_micros();
     format!("{:x}", ms ^ (ms >> 16))
+}
+
+// ── Live 60 FPS Drag Preview ─────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn render_drag_layers(
+    state: tauri::State<'_, SharedProjectState>,
+    layer_id: String,
+) -> Result<DragLayersPreview, String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    let dir = std::env::temp_dir();
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let below = dir.join(format!("veltrax-drag-{}-below.png", ms)).to_string_lossy().to_string();
+    let layer = dir.join(format!("veltrax-drag-{}-layer.png", ms)).to_string_lossy().to_string();
+    let above = dir.join(format!("veltrax-drag-{}-above.png", ms)).to_string_lossy().to_string();
+    render_drag_split(&mut s.current, &layer_id, &below, &layer, &above)
+}
+
+// ── Phase 4: Alpha Masks, Magic Wand, Lasso, Brush/Eraser, AI BG Removal ────
+
+fn appdata_subdir(sub: &str) -> Result<std::path::PathBuf, String> {
+    let appdata = std::env::var("APPDATA").map_err(|e| e.to_string())?;
+    let dir = std::path::PathBuf::from(appdata).join("Veltrax Studios").join(sub);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+fn load_or_init_alpha_mask(w: u32, h: u32, existing: Option<&str>) -> image::GrayImage {
+    if let Some(p) = existing {
+        if let Ok(dyn_img) = image::open(p) {
+            return if dyn_img.width() == w && dyn_img.height() == h {
+                dyn_img.to_luma8()
+            } else {
+                dyn_img.resize_exact(w, h, FilterType::Triangle).to_luma8()
+            };
+        }
+    }
+    image::GrayImage::from_pixel(w, h, image::Luma([255u8]))
+}
+
+fn save_alpha_mask(layer_id: &str, mask: &image::GrayImage) -> Result<String, String> {
+    let dir = appdata_subdir("masks")?;
+    let dest = dir.join(format!("{}_{}.png", layer_id, uuid_v4()));
+    image::DynamicImage::ImageLuma8(mask.clone())
+        .save(&dest)
+        .map_err(|e| format!("Failed to save mask: {}", e))?;
+    Ok(dest.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn reset_alpha_mask(
+    state: tauri::State<'_, SharedProjectState>,
+    layer_id: String,
+) -> Result<ProjectResponse, String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.push_undo();
+    let layer = s
+        .current
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or_else(|| format!("Layer '{}' not found.", layer_id))?;
+    layer.alpha_mask_path = None;
+    render_and_respond(&mut s)
+}
+
+#[tauri::command]
+pub fn magic_wand_mask(
+    state: tauri::State<'_, SharedProjectState>,
+    layer_id: String,
+    x: u32,
+    y: u32,
+    tolerance: u8,
+    erase: bool,
+    contiguous: Option<bool>,
+) -> Result<ProjectResponse, String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.push_undo();
+    let layer = s
+        .current
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or_else(|| format!("Layer '{}' not found.", layer_id))?;
+
+    let base_img = render_layer_kind(&layer.kind)?;
+    let (w, h) = (base_img.width(), base_img.height());
+    if x >= w || y >= h {
+        return Err("Click point is outside layer bounds.".to_string());
+    }
+
+    let seed = base_img.get_pixel(x, y).0;
+    let tol_sq = (tolerance as i32) * (tolerance as i32) * 3;
+    let target_val = if erase { 0u8 } else { 255u8 };
+    let mut mask = load_or_init_alpha_mask(w, h, layer.alpha_mask_path.as_deref());
+
+    let color_match = |p: [u8; 4]| -> bool {
+        let dr = p[0] as i32 - seed[0] as i32;
+        let dg = p[1] as i32 - seed[1] as i32;
+        let db = p[2] as i32 - seed[2] as i32;
+        dr * dr + dg * dg + db * db <= tol_sq
+    };
+
+    if contiguous.unwrap_or(true) {
+        let mut visited = vec![false; (w * h) as usize];
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back((x, y));
+        visited[(y * w + x) as usize] = true;
+        while let Some((cx, cy)) = queue.pop_front() {
+            mask.put_pixel(cx, cy, image::Luma([target_val]));
+            let neighbors = [
+                (cx.wrapping_sub(1), cy),
+                (cx + 1, cy),
+                (cx, cy.wrapping_sub(1)),
+                (cx, cy + 1),
+            ];
+            for (nx, ny) in neighbors {
+                if nx < w && ny < h {
+                    let idx = (ny * w + nx) as usize;
+                    if !visited[idx] && color_match(base_img.get_pixel(nx, ny).0) {
+                        visited[idx] = true;
+                        queue.push_back((nx, ny));
+                    }
+                }
+            }
+        }
+    } else {
+        for py in 0..h {
+            for px in 0..w {
+                if color_match(base_img.get_pixel(px, py).0) {
+                    mask.put_pixel(px, py, image::Luma([target_val]));
+                }
+            }
+        }
+    }
+
+    let mask_path = save_alpha_mask(&layer.id, &mask)?;
+    layer.alpha_mask_path = Some(mask_path);
+    render_and_respond(&mut s)
+}
+
+#[tauri::command]
+pub fn lasso_mask(
+    state: tauri::State<'_, SharedProjectState>,
+    layer_id: String,
+    points: Vec<[f32; 2]>,
+    mode: String, // "erase_inside" | "keep_inside"
+) -> Result<ProjectResponse, String> {
+    if points.len() < 3 {
+        return Err("Lasso requires at least 3 points.".to_string());
+    }
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.push_undo();
+    let layer = s
+        .current
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or_else(|| format!("Layer '{}' not found.", layer_id))?;
+
+    let base_img = render_layer_kind(&layer.kind)?;
+    let (w, h) = (base_img.width(), base_img.height());
+    let mut mask = load_or_init_alpha_mask(w, h, layer.alpha_mask_path.as_deref());
+    let verts: Vec<(f32, f32)> = points.iter().map(|p| (p[0], p[1])).collect();
+    let erase_inside = mode == "erase_inside";
+
+    for py in 0..h {
+        for px in 0..w {
+            let inside = point_in_polygon(px as f32 + 0.5, py as f32 + 0.5, &verts);
+            if (erase_inside && inside) || (!erase_inside && !inside) {
+                mask.put_pixel(px, py, image::Luma([0u8]));
+            }
+        }
+    }
+
+    let mask_path = save_alpha_mask(&layer.id, &mask)?;
+    layer.alpha_mask_path = Some(mask_path);
+    render_and_respond(&mut s)
+}
+
+#[tauri::command]
+pub fn brush_mask_stroke(
+    state: tauri::State<'_, SharedProjectState>,
+    layer_id: String,
+    points: Vec<[f32; 2]>,
+    radius: f32,
+    softness: f32,
+    erase: bool,
+    record_undo: Option<bool>,
+) -> Result<ProjectResponse, String> {
+    if points.is_empty() {
+        return Err("No stroke points provided.".to_string());
+    }
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    if record_undo.unwrap_or(true) {
+        s.push_undo();
+    }
+    let layer = s
+        .current
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or_else(|| format!("Layer '{}' not found.", layer_id))?;
+
+    let base_img = render_layer_kind(&layer.kind)?;
+    let (w, h) = (base_img.width(), base_img.height());
+    let mut mask = load_or_init_alpha_mask(w, h, layer.alpha_mask_path.as_deref());
+    let r = radius.clamp(1.0, 200.0);
+    let soft = softness.clamp(0.0, 1.0);
+    let hard_r = r * (1.0 - soft * 0.85);
+
+    let paint_dab = |mask: &mut image::GrayImage, cx: f32, cy: f32| {
+        let min_x = (cx - r).floor().max(0.0) as u32;
+        let max_x = (cx + r).ceil().min((w - 1) as f32) as u32;
+        let min_y = (cy - r).floor().max(0.0) as u32;
+        let max_y = (cy + r).ceil().min((h - 1) as f32) as u32;
+        for py in min_y..=max_y {
+            for px in min_x..=max_x {
+                let d = ((px as f32 - cx).powi(2) + (py as f32 - cy).powi(2)).sqrt();
+                if d <= r {
+                    let strength = if d <= hard_r || r <= hard_r {
+                        1.0
+                    } else {
+                        ((r - d) / (r - hard_r)).clamp(0.0, 1.0)
+                    };
+                    let cur = mask.get_pixel(px, py)[0] as f32;
+                    let target = if erase { 0.0 } else { 255.0 };
+                    let next = (cur + (target - cur) * strength).round().clamp(0.0, 255.0) as u8;
+                    mask.put_pixel(px, py, image::Luma([next]));
+                }
+            }
+        }
+    };
+
+    for i in 0..points.len() {
+        let [x0, y0] = points[i];
+        paint_dab(&mut mask, x0, y0);
+        if i + 1 < points.len() {
+            let [x1, y1] = points[i + 1];
+            let dist = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
+            let steps = (dist / (r * 0.25).max(1.0)).ceil() as usize;
+            for step in 1..steps {
+                let t = step as f32 / steps as f32;
+                paint_dab(&mut mask, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
+            }
+        }
+    }
+
+    let mask_path = save_alpha_mask(&layer.id, &mask)?;
+    layer.alpha_mask_path = Some(mask_path);
+    render_and_respond(&mut s)
+}
+
+fn ensure_u2netp_model() -> Result<std::path::PathBuf, String> {
+    let dir = appdata_subdir("models")?;
+    let model_path = dir.join("u2netp.onnx");
+    if model_path.is_file() && std::fs::metadata(&model_path).map(|m| m.len() > 1_000_000).unwrap_or(false) {
+        return Ok(model_path);
+    }
+    let url = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx";
+    let resp = ureq::get(url)
+        .call()
+        .map_err(|e| format!("Failed to download U2-Net model (check internet): {}", e))?;
+    let mut bytes = Vec::new();
+    use std::io::Read;
+    resp.into_reader()
+        .take(20 * 1024 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Failed reading U2-Net model download: {}", e))?;
+    std::fs::write(&model_path, &bytes).map_err(|e| format!("Failed saving model: {}", e))?;
+    Ok(model_path)
+}
+
+#[tauri::command]
+pub fn ai_remove_background(
+    state: tauri::State<'_, SharedProjectState>,
+    layer_id: String,
+) -> Result<ProjectResponse, String> {
+    use tract_onnx::prelude::*;
+
+    let model_path = ensure_u2netp_model()?;
+    let (base_w, base_h, resized_rgb) = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        let layer = s
+            .current
+            .layers
+            .iter()
+            .find(|l| l.id == layer_id)
+            .ok_or_else(|| format!("Layer '{}' not found.", layer_id))?;
+        let base_img = render_layer_kind(&layer.kind)?;
+        let (bw, bh) = (base_img.width(), base_img.height());
+        let r320 = image::DynamicImage::ImageRgba8(base_img)
+            .resize_exact(320, 320, FilterType::Triangle)
+            .to_rgb8();
+        (bw, bh, r320)
+    };
+
+    let model = tract_onnx::onnx()
+        .model_for_path(&model_path)
+        .map_err(|e| format!("ONNX load error: {}", e))?
+        .with_input_fact(0, InferenceFact::dt_shape(f32::datum_type(), tvec!(1, 3, 320, 320)))
+        .map_err(|e| format!("ONNX input fact error: {}", e))?
+        .into_optimized()
+        .map_err(|e| format!("ONNX optimize error: {}", e))?
+        .into_runnable()
+        .map_err(|e| format!("ONNX runnable error: {}", e))?;
+
+    let mean = [0.485f32, 0.456, 0.406];
+    let stdv = [0.229f32, 0.224, 0.225];
+    let input = tract_ndarray::Array4::from_shape_fn((1, 3, 320, 320), |(_, c, y, x)| {
+        let p = resized_rgb.get_pixel(x as u32, y as u32)[c] as f32 / 255.0;
+        (p - mean[c]) / stdv[c]
+    });
+    let tensor: Tensor = input.into();
+    let outputs = model
+        .run(tvec!(tensor.into()))
+        .map_err(|e| format!("ONNX inference error: {}", e))?;
+
+    let out_arr = outputs[0]
+        .to_array_view::<f32>()
+        .map_err(|e| format!("ONNX output view error: {}", e))?;
+
+    let mut min_v = f32::MAX;
+    let mut max_v = f32::MIN;
+    for &v in out_arr.iter() {
+        if v < min_v { min_v = v; }
+        if v > max_v { max_v = v; }
+    }
+    let span = (max_v - min_v).max(1e-6);
+    let mut mask_320 = image::GrayImage::new(320, 320);
+    let slice = out_arr.as_slice().unwrap_or(&[]);
+    for y in 0..320u32 {
+        for x in 0..320u32 {
+            let idx = (y * 320 + x) as usize;
+            let val = slice.get(idx).copied().unwrap_or(0.0);
+            let norm = ((val - min_v) / span).clamp(0.0, 1.0);
+            mask_320.put_pixel(x, y, image::Luma([(norm * 255.0) as u8]));
+        }
+    }
+    let full_mask = image::DynamicImage::ImageLuma8(mask_320)
+        .resize_exact(base_w, base_h, FilterType::Triangle)
+        .to_luma8();
+
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.push_undo();
+    let mask_path = save_alpha_mask(&layer_id, &full_mask)?;
+    let layer = s
+        .current
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or_else(|| format!("Layer '{}' not found.", layer_id))?;
+    layer.alpha_mask_path = Some(mask_path);
+    render_and_respond(&mut s)
 }
 
 #[tauri::command]

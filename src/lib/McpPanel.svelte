@@ -158,6 +158,8 @@
               <span class="client-name">{client.name}</span>
               {#if client.connected}
                 <span class="badge connected">Connected</span>
+              {:else if client.outdated}
+                <span class="badge outdated">Outdated Path</span>
               {:else if client.installed}
                 <span class="badge installed">Installed</span>
               {:else}
@@ -174,6 +176,15 @@
             <button class="btn-ghost fw sm" onclick={() => handleReconnect(client.id)}>
               <RefreshCw size={12} strokeWidth={1.75} /> Reconnect
             </button>
+          {:else if client.outdated}
+            <button
+              class="btn-primary fw sm"
+              onclick={() => handleReconnect(client.id)}
+              disabled={!client.installed || hasConnectedLimit}
+              title={!client.installed ? 'Client not detected on this PC' : 'Update executable path in config'}
+            >
+              <RefreshCw size={12} strokeWidth={1.75} /> Update Path
+            </button>
           {:else if client.installed}
             <button
               class="btn-primary fw sm"
@@ -185,10 +196,10 @@
           {:else}
             <button
               class="btn-ghost fw sm"
-              onclick={() => handleConnect(client.id)}
-              disabled={hasConnectedLimit}
+              disabled={true}
+              title="Not detected on this PC. Use Manual Setup below."
             >
-              <Plug size={12} strokeWidth={1.75} /> Force Create Config
+              <Plug size={12} strokeWidth={1.75} /> Not Installed
             </button>
           {/if}
         </div>
@@ -262,6 +273,7 @@
 
   .badge { display:inline-flex; align-items:center; gap:4px; font-size:10px; font-weight:600; padding:1px 7px; border-radius:999px; width:fit-content; }
   .badge.installed { background:rgba(16,185,129,0.16); color:#34d399; }
+  .badge.outdated { background:rgba(245,158,11,0.18); color:#fbbf24; }
   .badge.connected { background:var(--accent-subtle); color:#a5b4fc; }
   .badge.missing { background:rgba(255,255,255,0.06); color:var(--text-muted); }
 

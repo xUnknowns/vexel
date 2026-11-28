@@ -15,6 +15,8 @@ pub struct AiClientStatus {
     pub name: String,
     pub installed: bool,
     pub connected: bool,
+    pub outdated: bool,
+    pub status: String, // "not_detected" | "installed" | "connected" | "outdated"
     pub config_path: String,
 }
 
@@ -38,28 +40,167 @@ fn userprofile_dir() -> String {
     std::env::var("USERPROFILE").unwrap_or_else(|_| r"C:\Users\Public".to_string())
 }
 
-fn json_has_veltrax(path: &std::path::Path) -> bool {
-    if !path.is_file() {
+fn norm_path_str(p: &str) -> String {
+    p.trim().replace('\\', "/").to_lowercase()
+}
+
+fn current_exe_norm() -> String {
+    std::env::current_exe()
+        .map(|p| norm_path_str(&p.to_string_lossy()))
+        .unwrap_or_default()
+}
+
+fn has_exe_in_dir(dir: &std::path::Path, exe_names: &[&str]) -> bool {
+    if !dir.is_dir() {
         return false;
     }
-    if let Ok(raw) = std::fs::read_to_string(path) {
-        if let Ok(v) = serde_json::from_str::<Value>(&raw) {
-            return v
-                .get("mcpServers")
-                .and_then(|s| s.get("veltrax-studios"))
-                .is_some();
+    for name in exe_names {
+        if dir.join(name).is_file() {
+            return true;
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                if let Some(dname) = p.file_name().and_then(|n| n.to_str()) {
+                    if dname.starts_with("app-") {
+                        for name in exe_names {
+                            if p.join(name).is_file() {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     false
 }
 
-fn toml_has_veltrax(path: &std::path::Path) -> bool {
-    if !path.is_file() {
-        return false;
+fn cmd_in_path(bin: &str) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        std::process::Command::new("where")
+            .arg(bin)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
-    std::fs::read_to_string(path)
-        .map(|raw| raw.contains("[mcp_servers.veltrax-studios]"))
-        .unwrap_or(false)
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("which")
+            .arg(bin)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+}
+
+fn uninstall_reg_has(keyword: &str) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let keys = [
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+            r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+            r"HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+        ];
+        for key in keys {
+            if let Ok(out) = std::process::Command::new("reg")
+                .args(["query", key, "/s", "/f", keyword, "/d"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+            {
+                if out.status.success() {
+                    let s = String::from_utf8_lossy(&out.stdout);
+                    if s.to_lowercase().contains(&keyword.to_lowercase()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = keyword;
+        false
+    }
+}
+
+/// Returns `(connected, outdated)` for a JSON MCP config file.
+fn json_veltrax_status(path: &std::path::Path, cur_exe: &str) -> (bool, bool) {
+    if !path.is_file() {
+        return (false, false);
+    }
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return (false, false);
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+        return (false, false);
+    };
+    let Some(entry) = v.get("mcpServers").and_then(|s| s.get("veltrax-studios")) else {
+        return (false, false);
+    };
+    let cmd = entry.get("command").and_then(|c| c.as_str()).unwrap_or("");
+    if !cur_exe.is_empty() && norm_path_str(cmd) == cur_exe {
+        (true, false)
+    } else {
+        (false, true)
+    }
+}
+
+/// Returns `(connected, outdated)` for a TOML MCP config file.
+fn toml_veltrax_status(path: &std::path::Path, cur_exe: &str) -> (bool, bool) {
+    if !path.is_file() {
+        return (false, false);
+    }
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return (false, false);
+    };
+    let mut in_section = false;
+    let mut found_section = false;
+    let mut cmd_val: Option<String> = None;
+    for line in raw.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_section = t == "[mcp_servers.veltrax-studios]";
+            if in_section {
+                found_section = true;
+            }
+            continue;
+        }
+        if in_section && t.starts_with("command") {
+            if let Some((_, rhs)) = t.split_once('=') {
+                let cleaned = rhs.trim().trim_matches('"').trim_matches('\'');
+                cmd_val = Some(cleaned.to_string());
+            }
+        }
+    }
+    if !found_section {
+        return (false, false);
+    }
+    match cmd_val {
+        Some(c) if !cur_exe.is_empty() && norm_path_str(&c) == cur_exe => (true, false),
+        _ => (false, true),
+    }
+}
+
+fn status_label(installed: bool, connected: bool, outdated: bool) -> String {
+    if connected {
+        "connected".to_string()
+    } else if outdated {
+        "outdated".to_string()
+    } else if installed {
+        "installed".to_string()
+    } else {
+        "not_detected".to_string()
+    }
 }
 
 #[tauri::command]
@@ -67,62 +208,118 @@ pub fn scan_desktop_ai_clients() -> Vec<AiClientStatus> {
     let appdata = appdata_dir();
     let local_appdata = local_appdata_dir();
     let userprofile = userprofile_dir();
+    let cur_exe = current_exe_norm();
 
-    let claude_dir = std::path::Path::new(&appdata).join("Claude");
-    let claude_local = std::path::Path::new(&local_appdata).join("AnthropicClaude");
-    let claude_cfg = claude_dir.join("claude_desktop_config.json");
+    let claude_cfg = std::path::Path::new(&appdata)
+        .join("Claude")
+        .join("claude_desktop_config.json");
+    let claude_installed = has_exe_in_dir(
+        &std::path::Path::new(&local_appdata).join("AnthropicClaude"),
+        &["claude.exe", "Claude.exe"],
+    ) || has_exe_in_dir(
+        &std::path::Path::new(&local_appdata).join("Programs").join("claude"),
+        &["Claude.exe", "claude.exe"],
+    ) || std::path::Path::new(r"C:\Program Files\Claude\Claude.exe").is_file()
+        || uninstall_reg_has("Claude");
+    let (claude_conn, claude_out) = json_veltrax_status(&claude_cfg, &cur_exe);
 
-    let lmstudio_dir = std::path::Path::new(&userprofile).join(".lmstudio");
-    let lmstudio_cfg = lmstudio_dir.join("mcp.json");
+    let lmstudio_cfg = std::path::Path::new(&userprofile).join(".lmstudio").join("mcp.json");
+    let lmstudio_installed = has_exe_in_dir(
+        &std::path::Path::new(&local_appdata).join("LM-Studio"),
+        &["LM Studio.exe"],
+    ) || has_exe_in_dir(
+        &std::path::Path::new(&local_appdata).join("Programs").join("LM Studio"),
+        &["LM Studio.exe"],
+    ) || std::path::Path::new(r"C:\Program Files\LM Studio\LM Studio.exe").is_file()
+        || uninstall_reg_has("LM Studio");
+    let (lm_conn, lm_out) = json_veltrax_status(&lmstudio_cfg, &cur_exe);
 
-    let codex_dir = std::path::Path::new(&userprofile).join(".codex");
-    let codex_cfg = codex_dir.join("config.toml");
+    let codex_cfg = std::path::Path::new(&userprofile).join(".codex").join("config.toml");
+    let codex_installed = cmd_in_path("codex")
+        || std::path::Path::new(&appdata).join("npm").join("codex.cmd").is_file()
+        || std::path::Path::new(&userprofile).join(".cargo").join("bin").join("codex.exe").is_file();
+    let (codex_conn, codex_out) = toml_veltrax_status(&codex_cfg, &cur_exe);
 
-    let cursor_dir = std::path::Path::new(&userprofile).join(".cursor");
-    let cursor_cfg = cursor_dir.join("mcp.json");
+    let cursor_cfg = std::path::Path::new(&userprofile).join(".cursor").join("mcp.json");
+    let cursor_installed = has_exe_in_dir(
+        &std::path::Path::new(&local_appdata).join("Programs").join("cursor"),
+        &["Cursor.exe"],
+    ) || has_exe_in_dir(
+        &std::path::Path::new(&local_appdata).join("cursor"),
+        &["Cursor.exe"],
+    ) || std::path::Path::new(r"C:\Program Files\cursor\Cursor.exe").is_file()
+        || uninstall_reg_has("Cursor");
+    let (cursor_conn, cursor_out) = json_veltrax_status(&cursor_cfg, &cur_exe);
 
     vec![
         AiClientStatus {
             id: "claude".to_string(),
             name: "Claude Desktop".to_string(),
-            installed: claude_dir.exists() || claude_local.exists(),
-            connected: json_has_veltrax(&claude_cfg),
+            installed: claude_installed,
+            connected: claude_conn,
+            outdated: claude_out,
+            status: status_label(claude_installed, claude_conn, claude_out),
             config_path: claude_cfg.display().to_string(),
         },
         AiClientStatus {
             id: "lmstudio".to_string(),
             name: "LM Studio".to_string(),
-            installed: lmstudio_dir.exists(),
-            connected: json_has_veltrax(&lmstudio_cfg),
+            installed: lmstudio_installed,
+            connected: lm_conn,
+            outdated: lm_out,
+            status: status_label(lmstudio_installed, lm_conn, lm_out),
             config_path: lmstudio_cfg.display().to_string(),
         },
         AiClientStatus {
             id: "codex".to_string(),
             name: "ChatGPT / Codex".to_string(),
-            installed: codex_dir.exists(),
-            connected: toml_has_veltrax(&codex_cfg),
+            installed: codex_installed,
+            connected: codex_conn,
+            outdated: codex_out,
+            status: status_label(codex_installed, codex_conn, codex_out),
             config_path: codex_cfg.display().to_string(),
         },
         AiClientStatus {
             id: "cursor".to_string(),
             name: "Cursor".to_string(),
-            installed: cursor_dir.exists(),
-            connected: json_has_veltrax(&cursor_cfg),
+            installed: cursor_installed,
+            connected: cursor_conn,
+            outdated: cursor_out,
+            status: status_label(cursor_installed, cursor_conn, cursor_out),
             config_path: cursor_cfg.display().to_string(),
         },
     ]
 }
 
-fn write_json_mcp_entry(config_path: &std::path::Path, exe_str: &str) -> Result<(), String> {
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
+fn backup_existing_file(path: &std::path::Path) -> Result<(), String> {
+    if path.is_file() {
+        let bak = std::path::PathBuf::from(format!("{}.bak", path.display()));
+        std::fs::copy(path, &bak).map_err(|e| format!("Failed to create backup: {}", e))?;
     }
-    let mut config: Value = if config_path.exists() {
-        let raw = std::fs::read_to_string(config_path).unwrap_or_default();
-        serde_json::from_str(&raw).unwrap_or_else(|_| json!({}))
+    Ok(())
+}
+
+fn write_json_mcp_entry(config_path: &std::path::Path, exe_str: &str) -> Result<(), String> {
+    let mut config: Value = if config_path.is_file() {
+        backup_existing_file(config_path)?;
+        let raw = std::fs::read_to_string(config_path)
+            .map_err(|e| format!("Failed to read existing config: {}", e))?;
+        serde_json::from_str(&raw).map_err(|e| {
+            format!(
+                "Existing config JSON is invalid ({}). Backup saved at {}.bak; aborting to avoid data loss.",
+                e,
+                config_path.display()
+            )
+        })?
     } else {
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
+        }
         json!({})
     };
+    if !config.is_object() {
+        return Err("Existing config root is not a JSON object; aborting.".to_string());
+    }
     if config.get("mcpServers").is_none() || !config["mcpServers"].is_object() {
         config["mcpServers"] = json!({});
     }
@@ -137,54 +334,67 @@ fn write_json_mcp_entry(config_path: &std::path::Path, exe_str: &str) -> Result<
 
 #[tauri::command]
 pub fn connect_ai_client(client_id: String) -> Result<String, String> {
+    let clients = scan_desktop_ai_clients();
+    let client = clients
+        .iter()
+        .find(|c| c.id == client_id)
+        .ok_or_else(|| format!("Unknown AI client '{}'", client_id))?;
+
+    if !client.installed {
+        return Err(format!(
+            "{} is not detected as installed on this PC. Install it first or use Manual Setup.",
+            client.name
+        ));
+    }
+
     let exe_path = std::env::current_exe()
         .map_err(|e| format!("Failed to get executable path: {}", e))?;
     let exe_str = exe_path.to_string_lossy().replace('\\', "/");
 
-    let appdata = appdata_dir();
-    let userprofile = userprofile_dir();
-
+    let cfg = std::path::PathBuf::from(&client.config_path);
     match client_id.as_str() {
-        "claude" => {
-            let cfg = std::path::Path::new(&appdata)
-                .join("Claude")
-                .join("claude_desktop_config.json");
+        "claude" | "lmstudio" | "cursor" => {
             write_json_mcp_entry(&cfg, &exe_str)?;
-            Ok(format!("Connected to Claude Desktop ({})", cfg.display()))
-        }
-        "lmstudio" => {
-            let cfg = std::path::Path::new(&userprofile)
-                .join(".lmstudio")
-                .join("mcp.json");
-            write_json_mcp_entry(&cfg, &exe_str)?;
-            Ok(format!("Connected to LM Studio ({})", cfg.display()))
-        }
-        "cursor" => {
-            let cfg = std::path::Path::new(&userprofile)
-                .join(".cursor")
-                .join("mcp.json");
-            write_json_mcp_entry(&cfg, &exe_str)?;
-            Ok(format!("Connected to Cursor ({})", cfg.display()))
+            Ok(format!("Connected to {} ({})", client.name, cfg.display()))
         }
         "codex" => {
-            let dir = std::path::Path::new(&userprofile).join(".codex");
-            std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create .codex dir: {}", e))?;
-            let cfg = dir.join("config.toml");
-            let mut raw = if cfg.exists() {
-                std::fs::read_to_string(&cfg).unwrap_or_default()
+            if cfg.is_file() {
+                backup_existing_file(&cfg)?;
+            } else if let Some(parent) = cfg.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create .codex dir: {}", e))?;
+            }
+            let raw = if cfg.is_file() {
+                std::fs::read_to_string(&cfg)
+                    .map_err(|e| format!("Failed to read config.toml: {}", e))?
             } else {
                 String::new()
             };
-            if !raw.contains("[mcp_servers.veltrax-studios]") {
-                if !raw.is_empty() && !raw.ends_with('\n') {
-                    raw.push('\n');
+            // Remove any existing [mcp_servers.veltrax-studios] block so outdated paths are replaced cleanly
+            let mut out = String::new();
+            let mut skipping = false;
+            for line in raw.lines() {
+                let trimmed = line.trim();
+                if trimmed == "[mcp_servers.veltrax-studios]" {
+                    skipping = true;
+                    continue;
                 }
-                raw.push_str(&format!(
-                    "\n[mcp_servers.veltrax-studios]\ncommand = '{}'\nargs = [\"--mcp\"]\n",
-                    exe_str
-                ));
-                std::fs::write(&cfg, raw).map_err(|e| format!("Failed to write config.toml: {}", e))?;
+                if skipping && trimmed.starts_with('[') {
+                    skipping = false;
+                }
+                if !skipping {
+                    out.push_str(line);
+                    out.push('\n');
+                }
             }
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&format!(
+                "\n[mcp_servers.veltrax-studios]\ncommand = '{}'\nargs = [\"--mcp\"]\n",
+                exe_str
+            ));
+            std::fs::write(&cfg, out).map_err(|e| format!("Failed to write config.toml: {}", e))?;
             Ok(format!("Connected to ChatGPT / Codex ({})", cfg.display()))
         }
         other => Err(format!("Unknown AI client '{}'", other)),
@@ -489,6 +699,13 @@ fn execute_mcp_layer_tool(
                 group_id: None,
                 effects: LayerEffects::default(),
                 outline: LayerOutline::default(),
+                shadow: DropShadow::default(),
+                outer_glow: GlowEffect::default(),
+                inner_glow: GlowEffect::default(),
+                clip_to_below: false,
+                mask_shape: None,
+                mask_radius: 0,
+                alpha_mask_path: None,
                 kind: LayerKind::Image {
                     source_path: path,
                     bg_remove_color: None,
@@ -553,6 +770,13 @@ fn execute_mcp_layer_tool(
                 group_id: None,
                 effects: LayerEffects::default(),
                 outline: LayerOutline::default(),
+                shadow: DropShadow::default(),
+                outer_glow: GlowEffect::default(),
+                inner_glow: GlowEffect::default(),
+                clip_to_below: false,
+                mask_shape: None,
+                mask_radius: 0,
+                alpha_mask_path: None,
                 kind: LayerKind::Text3D {
                     content,
                     font_style,
@@ -567,6 +791,10 @@ fn execute_mcp_layer_tool(
                     align: p["align"].as_str().unwrap_or("left").to_string(),
                     line_height: p["line_height"].as_f64().unwrap_or(1.2) as f32,
                     letter_spacing: p["letter_spacing"].as_f64().unwrap_or(0.0) as f32,
+                    underline: p["underline"].as_bool().unwrap_or(false),
+                    gradient_colors: None,
+                    gradient_angle: 90.0,
+                    curve_amount: p["curve_amount"].as_f64().unwrap_or(0.0) as f32,
                 },
             });
             render_and_respond(s)
@@ -713,6 +941,13 @@ fn execute_mcp_layer_tool(
                 group_id: None,
                 effects: LayerEffects::default(),
                 outline: LayerOutline::default(),
+                shadow: DropShadow::default(),
+                outer_glow: GlowEffect::default(),
+                inner_glow: GlowEffect::default(),
+                clip_to_below: false,
+                mask_shape: None,
+                mask_radius: 0,
+                alpha_mask_path: None,
                 kind: LayerKind::Shape {
                     shape_type,
                     width: width.max(4),
@@ -721,6 +956,9 @@ fn execute_mcp_layer_tool(
                     border_radius: radius,
                     border_color,
                     border_width,
+                    sides: 5,
+                    corner_radii: None,
+                    fill_gradient: None,
                 },
             });
             render_and_respond(s)
@@ -774,6 +1012,13 @@ fn execute_mcp_layer_tool(
                 group_id: None,
                 effects: LayerEffects::default(),
                 outline: LayerOutline::default(),
+                shadow: DropShadow::default(),
+                outer_glow: GlowEffect::default(),
+                inner_glow: GlowEffect::default(),
+                clip_to_below: false,
+                mask_shape: None,
+                mask_radius: 0,
+                alpha_mask_path: None,
                 kind: LayerKind::Gradient {
                     width: width.max(4),
                     height: height.max(4),
@@ -814,6 +1059,13 @@ fn execute_mcp_layer_tool(
                 group_id: None,
                 effects: LayerEffects::default(),
                 outline: LayerOutline::default(),
+                shadow: DropShadow::default(),
+                outer_glow: GlowEffect::default(),
+                inner_glow: GlowEffect::default(),
+                clip_to_below: false,
+                mask_shape: None,
+                mask_radius: 0,
+                alpha_mask_path: None,
                 kind: LayerKind::Watermark {
                     text,
                     font_style,
@@ -1283,6 +1535,7 @@ fn execute_mcp_layer_tool(
                 clip_to_below: false,
                 mask_shape: None,
                 mask_radius: 0,
+                alpha_mask_path: None,
                 kind: LayerKind::Shape {
                     shape_type,
                     width,
@@ -1302,6 +1555,131 @@ fn execute_mcp_layer_tool(
             let source_path = p["source_path"].as_str().ok_or("Missing 'source_path'")?;
             let _ = crate::tools::import_font(source_path.to_string())?;
             Ok(s.to_response())
+        }
+        "reset_alpha_mask" => {
+            let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
+            s.push_undo();
+            let layer = s
+                .current
+                .layers
+                .iter_mut()
+                .find(|l| l.id == lid)
+                .ok_or_else(|| format!("Layer '{}' not found.", lid))?;
+            layer.alpha_mask_path = None;
+            render_and_respond(s)
+        }
+        "magic_wand_mask" => {
+            let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
+            let x = p["x"].as_u64().ok_or("Missing 'x'")? as u32;
+            let y = p["y"].as_u64().ok_or("Missing 'y'")? as u32;
+            let tol = p["tolerance"].as_u64().unwrap_or(32).min(255) as u8;
+            let erase = p["erase"].as_bool().unwrap_or(true);
+            let contiguous = p["contiguous"].as_bool().unwrap_or(true);
+            s.push_undo();
+            let layer = s
+                .current
+                .layers
+                .iter_mut()
+                .find(|l| l.id == lid)
+                .ok_or_else(|| format!("Layer '{}' not found.", lid))?;
+            let base_img = crate::layers::render_layer_kind(&layer.kind)?;
+            let (w, h) = (base_img.width(), base_img.height());
+            if x >= w || y >= h {
+                return Err("Point outside layer bounds.".to_string());
+            }
+            let seed = base_img.get_pixel(x, y).0;
+            let tol_sq = (tol as i32) * (tol as i32) * 3;
+            let tval = if erase { 0u8 } else { 255u8 };
+            let mut mask = if let Some(ref mp) = layer.alpha_mask_path {
+                image::open(mp).map(|d| d.resize_exact(w, h, image::imageops::FilterType::Triangle).to_luma8())
+                    .unwrap_or_else(|_| image::GrayImage::from_pixel(w, h, image::Luma([255u8])))
+            } else {
+                image::GrayImage::from_pixel(w, h, image::Luma([255u8]))
+            };
+            let matches = |px: [u8; 4]| -> bool {
+                let dr = px[0] as i32 - seed[0] as i32;
+                let dg = px[1] as i32 - seed[1] as i32;
+                let db = px[2] as i32 - seed[2] as i32;
+                dr * dr + dg * dg + db * db <= tol_sq
+            };
+            if contiguous {
+                let mut vis = vec![false; (w * h) as usize];
+                let mut q = std::collections::VecDeque::new();
+                q.push_back((x, y));
+                vis[(y * w + x) as usize] = true;
+                while let Some((cx, cy)) = q.pop_front() {
+                    mask.put_pixel(cx, cy, image::Luma([tval]));
+                    for (nx, ny) in [(cx.wrapping_sub(1), cy), (cx + 1, cy), (cx, cy.wrapping_sub(1)), (cx, cy + 1)] {
+                        if nx < w && ny < h {
+                            let idx = (ny * w + nx) as usize;
+                            if !vis[idx] && matches(base_img.get_pixel(nx, ny).0) {
+                                vis[idx] = true;
+                                q.push_back((nx, ny));
+                            }
+                        }
+                    }
+                }
+            } else {
+                for py in 0..h {
+                    for px in 0..w {
+                        if matches(base_img.get_pixel(px, py).0) {
+                            mask.put_pixel(px, py, image::Luma([tval]));
+                        }
+                    }
+                }
+            }
+            let appdata = appdata_dir();
+            let dir = std::path::PathBuf::from(appdata).join("Veltrax Studios").join("masks");
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let dest = dir.join(format!("{}_mcp_{}.png", lid, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()));
+            image::DynamicImage::ImageLuma8(mask).save(&dest).map_err(|e| e.to_string())?;
+            layer.alpha_mask_path = Some(dest.to_string_lossy().to_string());
+            render_and_respond(s)
+        }
+        "lasso_mask" => {
+            let lid = p["layer_id"].as_str().ok_or("Missing 'layer_id'")?;
+            let pts_arr = p["points"].as_array().ok_or("Missing 'points'")?;
+            if pts_arr.len() < 3 {
+                return Err("Lasso requires at least 3 points.".to_string());
+            }
+            let verts: Vec<(f32, f32)> = pts_arr
+                .iter()
+                .filter_map(|v| {
+                    let a = v.as_array()?;
+                    Some((a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32))
+                })
+                .collect();
+            let erase_inside = p["mode"].as_str().unwrap_or("erase_inside") == "erase_inside";
+            s.push_undo();
+            let layer = s
+                .current
+                .layers
+                .iter_mut()
+                .find(|l| l.id == lid)
+                .ok_or_else(|| format!("Layer '{}' not found.", lid))?;
+            let base_img = crate::layers::render_layer_kind(&layer.kind)?;
+            let (w, h) = (base_img.width(), base_img.height());
+            let mut mask = if let Some(ref mp) = layer.alpha_mask_path {
+                image::open(mp).map(|d| d.resize_exact(w, h, image::imageops::FilterType::Triangle).to_luma8())
+                    .unwrap_or_else(|_| image::GrayImage::from_pixel(w, h, image::Luma([255u8])))
+            } else {
+                image::GrayImage::from_pixel(w, h, image::Luma([255u8]))
+            };
+            for py in 0..h {
+                for px in 0..w {
+                    let inside = crate::layers::point_in_polygon(px as f32 + 0.5, py as f32 + 0.5, &verts);
+                    if (erase_inside && inside) || (!erase_inside && !inside) {
+                        mask.put_pixel(px, py, image::Luma([0u8]));
+                    }
+                }
+            }
+            let appdata = appdata_dir();
+            let dir = std::path::PathBuf::from(appdata).join("Veltrax Studios").join("masks");
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let dest = dir.join(format!("{}_lasso_{}.png", lid, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()));
+            image::DynamicImage::ImageLuma8(mask).save(&dest).map_err(|e| e.to_string())?;
+            layer.alpha_mask_path = Some(dest.to_string_lossy().to_string());
+            render_and_respond(s)
         }
         other => Err(format!("Unknown MCP tool '{}'", other)),
     }
@@ -1757,6 +2135,44 @@ fn build_tools_description() -> Value {
                     "type": "object",
                     "properties": { "source_path": { "type": "string" } },
                     "required": ["source_path"]
+                }
+            },
+            {
+                "name": "magic_wand_mask",
+                "description": "Erase or restore a region on a layer's alpha mask using a tolerance flood fill from (x, y).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "layer_id": { "type": "string" },
+                        "x": { "type": "integer", "minimum": 0 },
+                        "y": { "type": "integer", "minimum": 0 },
+                        "tolerance": { "type": "integer", "minimum": 0, "maximum": 255 },
+                        "erase": { "type": "boolean" },
+                        "contiguous": { "type": "boolean" }
+                    },
+                    "required": ["layer_id", "x", "y"]
+                }
+            },
+            {
+                "name": "lasso_mask",
+                "description": "Apply a polygon lasso selection to erase inside or keep inside on a layer's alpha mask.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "layer_id": { "type": "string" },
+                        "points": { "type": "array", "items": { "type": "array", "items": { "type": "number" } } },
+                        "mode": { "type": "string", "enum": ["erase_inside", "keep_inside"] }
+                    },
+                    "required": ["layer_id", "points", "mode"]
+                }
+            },
+            {
+                "name": "reset_alpha_mask",
+                "description": "Clear the non-destructive alpha mask from a layer.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "layer_id": { "type": "string" } },
+                    "required": ["layer_id"]
                 }
             },
             {
