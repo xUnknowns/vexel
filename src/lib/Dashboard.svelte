@@ -1,6 +1,6 @@
 <script>
   import {
-    Plus, Paintbrush2, Home, Bot,
+    Plus, Paintbrush2, Home, Bot, Settings, Palette, AlertTriangle, RotateCcw, Trash2, Search,
     FolderOpen, Youtube, Instagram, Smartphone, LayoutGrid, Layers
   } from 'lucide-svelte';
   import { convertFileSrc } from '@tauri-apps/api/core';
@@ -8,8 +8,21 @@
 
   let {
     recentProjects = [],
+    templates = [],
     mcpIsActive = false,
     hasProject = false,
+    autosaveOffer = null,
+    startupWarning = '',
+    onSelectTemplate,
+    onImportTemplate,
+    onRecoverAutosave,
+    onDismissAutosave,
+    onDismissWarning,
+    onRemoveRecent,
+    onRelinkRecent,
+    onOpenSettings,
+    onOpenBrandKit,
+    onOpenBatch,
     onGoToEditor,
     onShowModal,
     onOpenFile,
@@ -18,6 +31,13 @@
   } = $props();
 
   let subView = $state('home'); // 'home' | 'mcp'
+  let tplCategory = $state('All');
+  const tplCategories = ['All', 'YouTube', 'Social', 'Gaming', 'Logo', 'Custom'];
+  let filteredTemplates = $derived(
+    tplCategory === 'All'
+      ? templates
+      : templates.filter((t) => (t.category || 'Custom') === tplCategory)
+  );
 
   const quickPresets = [
     { label: 'Open Image', sub: null, icon: FolderOpen, action: 'open' },
@@ -40,7 +60,7 @@
 <div class="dashboard-shell">
   <aside class="g-sidebar">
     <div class="sidebar-logo" title="Veltrax Studios by Crafters Apex">
-      <div class="logo-mark">V</div>
+      <img src="/logos/veltrax-icon-transparent-64.png" alt="Veltrax Studios" class="logo-img" />
     </div>
 
     <nav class="g-nav">
@@ -73,6 +93,33 @@
         <span class="g-nav-icon"><Bot size={19} strokeWidth={1.75} /></span>
         <span class="g-nav-label">AI (MCP)</span>
       </button>
+
+      <button
+        class="g-nav-btn"
+        onclick={onOpenBrandKit}
+        title="Brand Kits"
+      >
+        <span class="g-nav-icon"><Palette size={19} strokeWidth={1.75} /></span>
+        <span class="g-nav-label">Brand Kit</span>
+      </button>
+
+      <button
+        class="g-nav-btn"
+        onclick={onOpenBatch}
+        title="Batch Template Generator"
+      >
+        <span class="g-nav-icon"><Layers size={19} strokeWidth={1.75} /></span>
+        <span class="g-nav-label">Batch</span>
+      </button>
+
+      <button
+        class="g-nav-btn"
+        onclick={onOpenSettings}
+        title="Ajustes y Respaldo"
+      >
+        <span class="g-nav-icon"><Settings size={19} strokeWidth={1.75} /></span>
+        <span class="g-nav-label">Ajustes</span>
+      </button>
     </nav>
 
     <div class="sidebar-footer">
@@ -84,7 +131,28 @@
   <main class="d-main">
     {#if subView === 'home'}
       <div class="d-scroll">
+        {#if autosaveOffer}
+          <div class="recovery-banner">
+            <RotateCcw size={16} strokeWidth={2} />
+            <div style="flex:1;">
+              <strong>Cierre inesperado detectado</strong>
+              <span>¿Recuperar el último estado de «{autosaveOffer.project_name}»?</span>
+            </div>
+            <button class="btn-primary sm" onclick={onRecoverAutosave}>Recuperar</button>
+            <button class="btn-ghost sm" onclick={onDismissAutosave}>Descartar</button>
+          </div>
+        {/if}
+
+        {#if startupWarning}
+          <div class="warn-banner">
+            <AlertTriangle size={16} strokeWidth={2} />
+            <span style="flex:1;">{startupWarning}</span>
+            <button class="btn-ghost sm" onclick={onDismissWarning}>OK</button>
+          </div>
+        {/if}
+
         <section class="hero">
+          <img src="/logos/veltrax-logo-banner-dark.png" alt="Veltrax Studios" class="hero-banner" />
           <h1 class="hero-title">What will you create today?</h1>
           <p class="hero-sub">Build YouTube thumbnails, transparent PNG logos, and layered edits in Veltrax Studios.</p>
 
@@ -107,30 +175,87 @@
           </div>
         </section>
 
-        {#if recentProjects.length > 0}
+        {#if templates.length > 0}
           <section class="recent">
-            <div class="section-head">
-              <h2>Continue Editing</h2>
-              <span class="count">{recentProjects.length} in session</span>
+            <div class="section-head" style="justify-content:space-between; flex-wrap:wrap;">
+              <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                <h2>Featured Templates</h2>
+                <div class="cat-pills">
+                  {#each tplCategories as cat}
+                    <button
+                      class="cat-pill"
+                      class:active={tplCategory === cat}
+                      onclick={() => (tplCategory = cat)}
+                    >
+                      {cat}
+                    </button>
+                  {/each}
+                </div>
+              </div>
+              <button class="btn-ghost sm" onclick={onImportTemplate}>Import .vtemplate</button>
             </div>
 
             <div class="recent-grid">
-              {#each recentProjects as item}
-                <button class="r-card" onclick={() => onLoadRecent(item.path)}>
+              {#each filteredTemplates as tpl}
+                <button class="r-card" onclick={() => onSelectTemplate && onSelectTemplate(tpl)}>
                   <div class="r-thumb">
-                    {#if !item.path.toLowerCase().endsWith('.veltrax')}
-                      <img src={`${convertFileSrc(item.path)}?v=1`} alt={item.name} loading="lazy" />
+                    {#if tpl.preview_data_url}
+                      <img src={tpl.preview_data_url} alt={tpl.name} loading="lazy" />
                     {:else}
                       <Layers size={28} strokeWidth={1.5} />
                     {/if}
                   </div>
                   <div class="r-meta">
-                    <span class="r-name">{item.name}</span>
-                    {#if item.width}
-                      <span class="r-dim">{item.width} × {item.height} px</span>
-                    {/if}
+                    <span class="r-name">{tpl.name}</span>
+                    <span class="r-dim">{tpl.category} · {tpl.canvas_width}×{tpl.canvas_height}</span>
                   </div>
                 </button>
+              {/each}
+            </div>
+          </section>
+        {/if}
+
+        {#if recentProjects.length > 0}
+          <section class="recent">
+            <div class="section-head">
+              <h2>Continue Editing</h2>
+              <span class="count">{recentProjects.length} recientes</span>
+            </div>
+
+            <div class="recent-grid">
+              {#each recentProjects as item}
+                <div class="r-card" class:missing={!item.exists}>
+                  <button
+                    class="r-card-main"
+                    onclick={() => item.exists && onLoadRecent(item.path)}
+                    disabled={!item.exists}
+                    title={item.exists ? item.path : `Archivo no encontrado: ${item.path}`}
+                  >
+                    <div class="r-thumb">
+                      {#if item.thumbnail_path}
+                        <img src={`${convertFileSrc(item.thumbnail_path)}?v=${item.updated_at || 1}`} alt={item.name} loading="lazy" />
+                      {:else if item.exists && !item.path.toLowerCase().endsWith('.veltrax')}
+                        <img src={`${convertFileSrc(item.path)}?v=1`} alt={item.name} loading="lazy" />
+                      {:else}
+                        <Layers size={28} strokeWidth={1.5} />
+                      {/if}
+                    </div>
+                    <div class="r-meta">
+                      <span class="r-name">{item.name}</span>
+                      {#if !item.exists}
+                        <span class="r-missing-tag">No encontrado en disco</span>
+                      {:else if item.width}
+                        <span class="r-dim">{item.width} × {item.height} px</span>
+                      {/if}
+                    </div>
+                  </button>
+                  {#if !item.exists}
+                    <div class="r-missing-actions">
+                      <button class="btn-ghost sm" onclick={() => onRelinkRecent(item.path)} title="Localizar archivo"><Search size={11} /> Localizar</button>
+                      <button class="btn-ghost sm danger" onclick={() => onRemoveRecent(item.path)} title="Quitar de recientes"><Trash2 size={11} /> Quitar</button>
+                    </div>
+                  {/if}
+                </div>
               {/each}
             </div>
           </section>
@@ -169,12 +294,8 @@
     display:flex; flex-direction:column; align-items:center; padding:14px 0 20px; gap:4px;
   }
   .sidebar-logo { margin-bottom:18px; }
-  .logo-mark {
-    width:36px; height:36px; border-radius:10px;
-    background:linear-gradient(135deg, var(--accent), #818cf8);
-    display:grid; place-items:center; font-weight:800; font-size:18px; color:#fff;
-    box-shadow:0 4px 14px var(--accent-glow);
-  }
+  .logo-img { width:36px; height:36px; object-fit:contain; display:block; border-radius:8px; }
+  .hero-banner { height:40px; width:auto; object-fit:contain; align-self:flex-start; opacity:0.95; }
   .g-nav { display:flex; flex-direction:column; align-items:center; gap:2px; width:100%; padding:0 8px; }
   .g-nav-btn {
     display:flex; flex-direction:column; align-items:center; gap:4px; width:100%;
@@ -217,7 +338,19 @@
   .count { font-size:12px; color:var(--text-muted); }
   .recent-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:14px; }
   .r-card { display:flex; flex-direction:column; background:var(--bg-card); border:1px solid var(--border); border-radius:var(--r-md); overflow:hidden; color:var(--text-primary); text-align:left; }
-  .r-card:hover:not(:disabled) { border-color:var(--border-active); box-shadow:0 8px 24px rgba(0,0,0,0.3); }
+  .r-card:hover:not(.missing) { border-color:var(--border-active); box-shadow:0 8px 24px rgba(0,0,0,0.3); }
+  .r-card.missing { border-color:rgba(239,68,68,0.45); opacity:0.9; }
+  .r-card-main { display:flex; flex-direction:column; background:transparent; border:none; padding:0; color:inherit; text-align:left; width:100%; cursor:pointer; }
+  .r-card-main:disabled { cursor:default; }
+  .r-missing-tag { font-size:10px; color:#f87171; font-weight:600; }
+  .r-missing-actions { display:flex; gap:6px; padding:0 10px 10px; }
+  .r-missing-actions .sm { flex:1; font-size:10px; padding:4px 6px; display:flex; align-items:center; justify-content:center; gap:4px; }
+  .cat-pills { display:flex; gap:6px; flex-wrap:wrap; }
+  .cat-pill { font-size:11px; padding:4px 10px; border-radius:999px; background:var(--bg-elevated); color:var(--text-secondary); border:1px solid var(--border); cursor:pointer; }
+  .cat-pill.active { background:var(--accent-subtle); border-color:var(--border-active); color:var(--text-primary); font-weight:600; }
+  .recovery-banner { display:flex; align-items:center; gap:12px; background:rgba(56,189,248,0.1); border:1px solid rgba(56,189,248,0.4); color:#e0f2fe; padding:12px 16px; border-radius:var(--r-md); font-size:12px; }
+  .recovery-banner strong { display:block; font-size:13px; color:#38bdf8; }
+  .warn-banner { display:flex; align-items:center; gap:10px; background:rgba(245,158,11,0.12); border:1px solid rgba(245,158,11,0.4); color:#fde68a; padding:10px 14px; border-radius:var(--r-md); font-size:12px; }
   .r-thumb { aspect-ratio:16/10; background:var(--bg-elevated); overflow:hidden; display:flex; align-items:center; justify-content:center; color:var(--text-muted); }
   .r-thumb img { width:100%; height:100%; object-fit:cover; display:block; }
   .r-meta { padding:10px 12px; display:flex; flex-direction:column; gap:3px; }

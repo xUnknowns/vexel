@@ -1,6 +1,7 @@
 <script>
   import { X, Download, FolderOpen } from 'lucide-svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
   import { open, save } from '@tauri-apps/plugin-dialog';
 
   let {
@@ -21,6 +22,16 @@
   let feedback = $state('');
   let batchMode = $state(false);
   let batchSelected = $state(['yt_thumb', 'ig_post', 'tiktok']);
+  let batchProgress = $state(null); // { done, total, current_item, finished, canceled, saved, errors }
+
+  $effect(() => {
+    const unlisten = listen('batch-progress', (ev) => {
+      batchProgress = ev.payload;
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  });
 
   $effect(() => {
     if (show) {
@@ -72,6 +83,7 @@
     if (!hasProject || saving || batchSelected.length === 0) return;
     saving = true;
     feedback = '';
+    batchProgress = null;
     try {
       const destDir = await open({ directory: true, multiple: false, title: 'Select Batch Export Folder' });
       if (typeof destDir !== 'string' || !destDir) {
@@ -85,20 +97,30 @@
           width: p.w ?? Math.max(1, Math.round(imgWidth * p.scale)),
           height: p.h ?? Math.max(1, Math.round(imgHeight * p.scale)),
         }));
-      const files = await invoke('export_batch', {
+      const summary = await invoke('export_multi_size_async', {
         destDir,
         baseName: fileName || 'export',
         format,
         quality: Number(quality),
         presets: presetsPayload,
       });
-      feedback = `Exported ${files.length} files to folder.`;
-      setTimeout(() => onClose(), 1200);
+      if (summary.canceled) {
+        feedback = `Canceled (${summary.saved.length} saved before cancel).`;
+      } else if (summary.errors?.length) {
+        feedback = `Exported ${summary.saved.length} files with ${summary.errors.length} error(s): ${summary.errors[0]}`;
+      } else {
+        feedback = `Exported ${summary.saved.length} files to folder.`;
+        setTimeout(() => onClose(), 1200);
+      }
     } catch (e) {
       feedback = `Batch export failed: ${e}`;
     } finally {
       saving = false;
     }
+  }
+
+  function handleCancelBatch() {
+    invoke('cancel_batch_export').catch(() => {});
   }
 
   async function handleExportBrandSizes() {
@@ -243,6 +265,18 @@
           {/if}
         </div>
 
+        {#if batchProgress && saving}
+          <div style="display:flex; flex-direction:column; gap:6px;">
+            <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--text-secondary);">
+              <span>{batchProgress.current_item}</span>
+              <span>{batchProgress.done} / {batchProgress.total}</span>
+            </div>
+            <div style="height:6px; background:var(--bg-elevated); border-radius:4px; overflow:hidden;">
+              <div style="height:100%; background:var(--accent); width:{batchProgress.total ? Math.round((batchProgress.done / batchProgress.total) * 100) : 0}%; transition:width 0.15s;"></div>
+            </div>
+          </div>
+        {/if}
+
         {#if feedback}
           <p class="feedback">{feedback}</p>
         {/if}
@@ -253,6 +287,9 @@
           All Brand Sizes (12)
         </button>
         <div style="flex:1;"></div>
+        {#if saving && batchMode}
+          <button class="btn-ghost" onclick={handleCancelBatch}>Cancel Batch</button>
+        {/if}
         <button class="btn-ghost" onclick={onClose} disabled={saving}>Cancel</button>
         <button class="btn-primary" onclick={handleSave} disabled={!hasProject || saving || (batchMode && batchSelected.length === 0)}>
           {#if saving}

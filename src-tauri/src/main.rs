@@ -1,8 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![recursion_limit = "256"]
 
+mod batch;
+mod brand;
 mod layers;
 mod mcp;
+mod storage;
+mod templates;
 mod tools;
 
 fn main() {
@@ -15,10 +19,33 @@ fn main() {
     let project_state: layers::SharedProjectState =
         std::sync::Arc::new(std::sync::Mutex::new(layers::ProjectState::default()));
     let state_for_server = project_state.clone();
+    let state_for_close = project_state.clone();
 
     tauri::Builder::default()
         .manage(project_state)
         .plugin(tauri_plugin_dialog::init())
+        .on_window_event(move |_window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                // Flush autosave and mark clean shutdown
+                if let Ok(s) = state_for_close.lock() {
+                    if s.has_project {
+                        if let Ok(dir) = storage::ensure_subdir("autosave") {
+                            if let Ok(json) = serde_json::to_string(&s.current) {
+                                let _ = storage::atomic_write_str(&dir.join("autosave.veltrax"), &json);
+                            }
+                        }
+                        if let Some(ref p) = s.project_file_path {
+                            if s.dirty {
+                                if let Ok(json) = serde_json::to_string_pretty(&s.current) {
+                                    let _ = storage::atomic_write_str(std::path::Path::new(p), &json);
+                                }
+                            }
+                        }
+                    }
+                }
+                storage::clear_session_lock();
+            }
+        })
         .setup(move |app| {
             let handle = app.handle().clone();
             mcp::start_internal_server(state_for_server, handle);
@@ -33,19 +60,37 @@ fn main() {
             tools::create_project,
             tools::open_base_image,
             tools::save_project_file,
+            tools::save_current_project,
             tools::load_project_file,
+            tools::check_missing_assets,
             tools::export_configured,
             tools::export_batch,
+            batch::export_multi_size_async,
+            batch::batch_render_template,
+            batch::cancel_batch_export,
             tools::trim_transparency,
             tools::save_autosave,
             tools::check_autosave,
+            tools::recover_autosave,
             tools::clear_autosave,
+            storage::get_app_settings,
+            storage::save_app_settings,
+            storage::get_recent_projects,
+            storage::remove_recent_project,
+            storage::relink_recent_project,
+            storage::export_user_data_zip,
+            storage::import_user_data_zip,
             tools::get_default_projects_dir,
             tools::get_user_library,
             tools::save_to_user_library,
             tools::delete_from_user_library,
             tools::get_brand_kit,
             tools::save_brand_kit,
+            brand::list_brand_kits,
+            brand::save_brand_kit_profile,
+            brand::delete_brand_kit_profile,
+            brand::set_active_brand_kit,
+            brand::add_brand_logo,
             tools::import_font,
             tools::list_imported_fonts,
             tools::delete_imported_font,
@@ -102,6 +147,13 @@ fn main() {
             tools::save_as_template,
             tools::delete_template,
             tools::apply_template_to_canvas,
+            templates::list_all_templates,
+            templates::save_current_as_vtemplate,
+            templates::preview_vtemplate_filled,
+            templates::create_project_from_vtemplate,
+            templates::export_vtemplate_file,
+            templates::import_vtemplate_file,
+            templates::delete_vtemplate,
             tools::add_smart_text_layer,
             tools::list_brand_sizes,
             tools::export_all_brand_sizes,

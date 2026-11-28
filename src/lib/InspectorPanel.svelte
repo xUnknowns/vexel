@@ -12,6 +12,7 @@
     project = null,
     selectedLayer = null,
     fontStyles = [],
+    brandFonts = [],
     filters = [],
     brandColors = [],
     recentColors = [],
@@ -499,9 +500,18 @@
               value={tFont}
               onchange={(e) => onLiveText({ font_style: e.currentTarget.value }, true)}
             >
-              {#each fontStyles as fs}
-                <option value={fs.id}>{fs.label}</option>
-              {/each}
+              {#if brandFonts.length > 0}
+                <optgroup label="Brand">
+                  {#each fontStyles.filter((fs) => brandFonts.includes(fs.id)) as fs}
+                    <option value={fs.id}>{fs.label}</option>
+                  {/each}
+                </optgroup>
+              {/if}
+              <optgroup label="All Fonts">
+                {#each fontStyles as fs}
+                  <option value={fs.id}>{fs.label}</option>
+                {/each}
+              </optgroup>
             </select>
 
             <div class="grid-2">

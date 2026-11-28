@@ -20,3 +20,4 @@ tiny_http       = "0.12"
 ureq            = { version = "2.10", features = ["json"] }
 base64          = "0.22"
 tract-onnx      = "0.21"
+zip             = { version = "2.2", default-features = false, features = ["deflate"] }

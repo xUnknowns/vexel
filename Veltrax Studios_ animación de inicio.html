@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Veltrax Studios — Animación de inicio</title>
+<style>
+:root{--bg:#0d0d12;--accent:#6366f1;--accent-2:#818cf8;--soft:#a5b4fc;--text:#fff;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:Inter,"Segoe UI",system-ui,-apple-system,sans-serif;overflow:hidden}
+.stage{position:relative;height:100%;display:grid;place-items:center;background:var(--bg)}
+.glow{position:absolute;width:min(90vw,820px);aspect-ratio:1;border-radius:50%;background:radial-gradient(closest-side,rgba(99,102,241,.28),rgba(99,102,241,0));opacity:0}
+.group{position:relative;display:flex;align-items:center;gap:clamp(14px,3vw,30px)}
+.mark{width:clamp(88px,20vw,150px);height:auto;overflow:visible;flex:none}
+.mark path{fill:var(--accent);fill-opacity:0;stroke:var(--accent-2);stroke-width:5;stroke-linejoin:round;stroke-opacity:1;stroke-dasharray:1;stroke-dashoffset:1}
+.word{overflow:hidden;max-width:0;padding:10px 0;white-space:nowrap}
+.name{display:block;font-weight:800;font-size:clamp(40px,10vw,76px);letter-spacing:-.02em;line-height:1}
+.name span{display:inline-block;opacity:0;transform:translateY(20px);filter:blur(8px)}
+.sub{display:block;margin-top:10px;font-weight:500;font-size:clamp(14px,3vw,22px);color:var(--soft);letter-spacing:.6em;opacity:0;padding-left:.2em}
+.bar{position:absolute;left:50%;bottom:12%;width:min(260px,60vw);height:3px;margin-left:calc(min(260px,60vw)/-2);background:rgba(255,255,255,.08);border-radius:3px;overflow:hidden;opacity:0}
+.bar i{display:block;height:100%;width:100%;background:linear-gradient(90deg,var(--accent),var(--soft));transform-origin:left;transform:scaleX(0)}
+.status{position:absolute;left:0;right:0;bottom:calc(12% - 28px);text-align:center;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:rgba(255,255,255,.45);opacity:0}
+button{position:absolute;right:16px;bottom:16px;background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.15);border-radius:8px;padding:8px 14px;font:inherit;font-size:13px;cursor:pointer}
+button:hover{background:rgba(255,255,255,.14)}
+
+/* ---- Línea de tiempo (≈4,2 s) ---- */
+.run .glow{animation:glow 4.2s ease-out forwards}
+.run .mark path{animation:draw 1.3s cubic-bezier(.65,0,.35,1) .35s forwards,fillin .6s ease 1.5s forwards,strokeout .5s ease 1.6s forwards}
+.run .mark path.b{animation-delay:.65s,1.65s,1.75s}
+.run .mark{animation:pulse 1s ease 1.5s}
+.run .word{animation:open 1s cubic-bezier(.22,1,.36,1) 2s forwards}
+.run .name span{animation:rise .7s cubic-bezier(.22,1,.36,1) forwards;animation-delay:calc(2.1s + var(--i)*.055s)}
+.run .sub{animation:subin 1s cubic-bezier(.22,1,.36,1) 2.6s forwards}
+.run .bar{animation:fade .4s ease .5s forwards}
+.run .bar i{animation:load 3.6s cubic-bezier(.4,0,.2,1) .5s forwards}
+.run .status{animation:fade .4s ease .8s forwards}
+@keyframes draw{to{stroke-dashoffset:0}}
+@keyframes fillin{to{fill-opacity:1}}
+@keyframes strokeout{to{stroke-opacity:0}}
+@keyframes pulse{40%{filter:drop-shadow(0 0 22px rgba(129,140,248,.9))}100%{filter:drop-shadow(0 0 0 rgba(129,140,248,0))}}
+@keyframes open{to{max-width:640px}}
+@keyframes rise{to{opacity:1;transform:none;filter:none}}
+@keyframes subin{from{letter-spacing:.9em;opacity:0}to{letter-spacing:.42em;opacity:1}}
+@keyframes glow{0%{opacity:0;transform:scale(.7)}50%{opacity:1}100%{opacity:.8;transform:scale(1)}}
+@keyframes fade{to{opacity:1}}
+@keyframes load{to{transform:scaleX(1)}}
+@media (prefers-reduced-motion:reduce){.run *{animation-duration:.01s!important;animation-delay:0s!important}}
+</style>
+</head>
+<body>
+<div class="stage run" id="stage">
+  <div class="glow"></div>
+  <div class="group">
+    <svg class="mark" viewBox="190 280 880 680" aria-hidden="true">
+      <path pathLength="1" d="M250 298 L432 298 Q470 300 492 335 L630 560 L768 335 Q790 300 828 298 L1000 298 Q1050 305 1050 350 L770 785 Q748 812 718 812 L540 812 Q508 812 485 785 L208 372 Q200 330 250 298 Z"/>
+      <path class="b" pathLength="1" d="M265 534 L468 838 Q490 868 525 868 L735 868 Q770 868 790 840 L993 534 Q1015 548 1013 575 L790 918 Q770 943 745 943 L512 943 Q485 943 465 918 L245 585 Q238 555 265 534 Z"/>
+    </svg>
+    <div class="word">
+      <span class="name" id="name" aria-label="Veltrax"></span>
+      <span class="sub">Studios</span>
+    </div>
+  </div>
+  <div class="bar"><i></i></div>
+  <div class="status">Cargando…</div>
+  <button id="replay" type="button">Repetir</button>
+</div>
+<script>
+(function(){
+  var name=document.getElementById('name');
+  "Veltrax".split('').forEach(function(c,i){
+    var s=document.createElement('span');s.textContent=c;s.style.setProperty('--i',i);name.appendChild(s);
+  });
+  var stage=document.getElementById('stage');
+  function play(){stage.classList.remove('run');void stage.offsetWidth;stage.classList.add('run');}
+  document.getElementById('replay').addEventListener('click',play);
+})();
+</script>
+</body>
+</html>

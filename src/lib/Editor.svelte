@@ -12,6 +12,7 @@
     MousePointer2, Wand2, Lasso, Paintbrush
   } from 'lucide-svelte';
   import ExportModal from './ExportModal.svelte';
+  import TemplateModal from './TemplateModal.svelte';
   import CanvasGizmo from './CanvasGizmo.svelte';
   import McpPanel from './McpPanel.svelte';
   import ContextualBar from './ContextualBar.svelte';
@@ -33,6 +34,7 @@
   let statusMsg = $state('Ready');
   let errorMsg = $state('');
   let showExportModal = $state(false);
+  let showSaveTemplateModal = $state(false);
   let zoom = $state(1.0);
   let canvasArea;
   let textInputEl;
@@ -392,13 +394,20 @@
     loadProjectTemplates();
   });
 
-  // ── Periodic Autosave (every 45s while project active) ──────────────────
+  // ── Debounced Autosave (~2s after edits) & Missing Asset Check ────────────
+  let missingAssets = $state([]);
   $effect(() => {
+    const _pv = project?.preview_path;
+    const _dirty = project?.dirty;
     if (!hasProject) return;
-    const id = setInterval(() => {
+    invoke('check_missing_assets')
+      .then((m) => { missingAssets = m || []; })
+      .catch(() => {});
+    if (!_dirty) return;
+    const t = setTimeout(() => {
       invoke('save_autosave').catch(() => {});
-    }, 45000);
-    return () => clearInterval(id);
+    }, 2000);
+    return () => clearTimeout(t);
   });
 
   async function uploadAndSaveElement() {
@@ -460,15 +469,19 @@
   // ── Rail & Presets ───────────────────────────────────────────────────────
   // ── Brand Kit & Live Debounced Updates ───────────────────────────────────
   let brandColors = $state(['#38BDF8', '#6366F1', '#EC4899', '#10B981', '#F59E0B']);
+  let brandFonts = $state([]);
   let recentColors = $state(['#FFFFFF', '#000000']);
   let liveTimer = null;
   let lastFitKey = '';
 
   async function loadBrandKit() {
     try {
-      const kit = await invoke('get_brand_kit');
-      if (kit?.colors) brandColors = kit.colors;
-      if (kit?.recent_colors) recentColors = kit.recent_colors;
+      const store = await invoke('list_brand_kits');
+      const active = store?.kits?.find((k) => k.id === store.active_id) || store?.kits?.[0];
+      if (active?.colors?.length) brandColors = active.colors.map((c) => c.hex);
+      if (active?.fonts) brandFonts = active.fonts;
+      const legacy = await invoke('get_brand_kit');
+      if (legacy?.recent_colors) recentColors = legacy.recent_colors;
     } catch (e) {
       console.error('loadBrandKit:', e);
     }
@@ -883,6 +896,10 @@
   function handleKeydown(e) {
     const tag = e.target?.tagName;
     const inInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      if (hasProject) saveCurrentProject();
+    }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
       if (inInput) return;
       e.preventDefault();
@@ -999,6 +1016,17 @@
     }
   }
 
+  async function saveCurrentProject() {
+    if (!hasProject) return;
+    try {
+      const resp = await invoke('save_current_project');
+      onProjectUpdate(resp);
+      statusMsg = 'Guardado';
+    } catch (e) {
+      errorMsg = String(e);
+    }
+  }
+
   async function saveVeltraxProject() {
     if (!hasProject) return;
     let defaultDir = '';
@@ -1014,7 +1042,8 @@
       filters: [{ name: 'Veltrax Project', extensions: ['veltrax'] }],
     });
     if (dest) {
-      await invoke('save_project_file', { destPath: dest });
+      const resp = await invoke('save_project_file', { destPath: dest });
+      onProjectUpdate(resp);
       statusMsg = 'Project saved';
     }
   }
@@ -1279,7 +1308,7 @@
         <ArrowLeft size={14} strokeWidth={2} /> Home
       </button>
       <div class="tb-divider"></div>
-      <button class="btn-ghost icon-btn sm" onclick={saveVeltraxProject} disabled={!hasProject} title="Save .veltrax project">
+      <button class="btn-ghost icon-btn sm" onclick={saveCurrentProject} disabled={!hasProject} title="Guardar proyecto (Ctrl+S)">
         <Save size={13} strokeWidth={2} /> Save
       </button>
       <button class="btn-ghost icon-btn sm" onclick={() => runCmd('undo_action', {}, 'Undo')} disabled={!project?.can_undo || isProcessing} title="Undo (Ctrl+Z)">
@@ -1300,6 +1329,13 @@
       />
       {#if hasProject}
         <span class="dim-label">{canvasW} × {canvasH} px</span>
+        <span
+          class="dim-label"
+          style="color:{project?.dirty ? '#fbbf24' : '#34d399'}; font-weight:600;"
+          title={project?.project_file_path || ''}
+        >
+          {project?.dirty ? '● Cambios sin guardar' : '✓ Guardado'}
+        </span>
       {/if}
     </div>
 
@@ -1560,6 +1596,9 @@
 
               <div class="divider"></div>
               <div class="section-title">Project Templates ({projectTemplates.length})</div>
+              <button class="btn-primary fw sm" style="margin-bottom:6px;" onclick={() => (showSaveTemplateModal = true)} disabled={!hasProject}>
+                <Sparkles size={12} /> Save as Editable Template (.vtemplate)
+              </button>
               <div style="display:flex; gap:6px; margin-bottom:6px;">
                 <input type="text" bind:value={newTemplateName} placeholder="Template name..." style="flex:1;" />
                 <button class="btn-ghost sm" onclick={saveAsTemplate} disabled={!hasProject || !newTemplateName.trim() || isProcessing}>Save</button>
@@ -1889,6 +1928,26 @@
 
     <!-- ── Center Workspace (Contextual Bar + Canvas) ─────────────────────── -->
     <div class="center-col">
+      {#if missingAssets.length > 0}
+        <div style="background:rgba(239,68,68,0.14); border-bottom:1px solid rgba(239,68,68,0.4); color:#fecaca; padding:6px 12px; font-size:11px; display:flex; align-items:center; justify-content:space-between; gap:8px;">
+          <span>Imagen no encontrada en {missingAssets.length} capa(s): {missingAssets.map((a) => a.layer_name).join(', ')}</span>
+          <button
+            class="btn-ghost sm"
+            onclick={async () => {
+              const sel = await open({
+                multiple: false,
+                title: `Reemplazar imagen para ${missingAssets[0].layer_name}`,
+                filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] }],
+              });
+              if (typeof sel === 'string' && sel) {
+                await runCmd('replace_image_layer', { layerId: missingAssets[0].layer_id, imagePath: sel }, 'Replace Missing Image');
+              }
+            }}
+          >
+            Reemplazar imagen
+          </button>
+        </div>
+      {/if}
       <ContextualBar
         {hasProject}
         {selectedLayer}
@@ -2119,6 +2178,7 @@
       {project}
       {selectedLayer}
       fontStyles={allFontStyles}
+      {brandFonts}
       {filters}
       {brandColors}
       {recentColors}
@@ -2151,6 +2211,17 @@
     imgHeight={canvasH}
     {transparentBg}
     onClose={() => (showExportModal = false)}
+  />
+
+  <TemplateModal
+    show={showSaveTemplateModal}
+    mode="save"
+    {layers}
+    onClose={() => (showSaveTemplateModal = false)}
+    onSavedTemplate={() => {
+      loadProjectTemplates();
+      statusMsg = 'Template saved';
+    }}
   />
 </div>
 

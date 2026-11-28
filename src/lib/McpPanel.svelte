@@ -222,7 +222,7 @@
       For ChatGPT Desktop UI, Perplexity Desktop, or custom MCP clients, copy the command or JSON snippet below:
     </p>
     <p class="manual-desc" style="color:#fbbf24;">
-      Si usas Claude Desktop de la Microsoft Store, la ruta de configuración es distinta; usa Settings → Developer → Edit Config.
+      If you use Claude Desktop from the Microsoft Store, the configuration path is different; use Settings → Developer → Edit Config.
     </p>
     <div class="copy-row">
       <button class="btn-ghost fw sm" onclick={() => copyText('cmd', snippets.exe_command)}>

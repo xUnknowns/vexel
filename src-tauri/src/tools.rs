@@ -88,7 +88,20 @@ pub fn rename_project(
 ) -> Result<(), String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
     s.current.project_name = name;
+    s.dirty = true;
     Ok(())
+}
+
+fn auto_project_file_path(project_name: &str, project_id: &str) -> Result<String, String> {
+    let dir = crate::storage::ensure_subdir("projects")?;
+    let slug: String = project_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let trimmed = slug.trim_matches('_');
+    let base = if trimmed.is_empty() { "project" } else { trimmed };
+    let path = dir.join(format!("{}_{}.veltrax", base, project_id));
+    Ok(path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -102,13 +115,21 @@ pub fn create_project(
     if width == 0 || height == 0 {
         return Err("Canvas width and height must be greater than zero.".to_string());
     }
+    let pname = project_name.unwrap_or_else(|| "Untitled Design".to_string());
+    let pid = format!("proj_{}", crate::storage::now_unix_millis());
+    let proj_path = auto_project_file_path(&pname, &pid)?;
+
     let mut s = state.lock().map_err(|e| e.to_string())?;
     s.undo_stack.clear();
     s.redo_stack.clear();
     s.has_project = true;
     s.is_in_editor = true;
+    s.project_file_path = Some(proj_path.clone());
+    s.dirty = false;
     s.current = ProjectSnapshot {
-        project_name: project_name.unwrap_or_else(|| "Untitled Design".to_string()),
+        schema_version: crate::storage::CURRENT_SCHEMA_VERSION,
+        project_id: pid,
+        project_name: pname,
         canvas_width: width,
         canvas_height: height,
         transparent_bg,
@@ -121,10 +142,14 @@ pub fn create_project(
         layers: Vec::new(),
         groups: Vec::new(),
     };
-    render_and_respond(&mut s)
+    if let Ok(json) = serde_json::to_string_pretty(&s.current) {
+        let _ = crate::storage::atomic_write_str(Path::new(&proj_path), &json);
+    }
+    crate::storage::write_session_lock();
+    let resp = render_and_respond(&mut s)?;
+    let _ = crate::storage::record_recent_project(&proj_path, &s.current, None);
+    Ok(resp)
 }
-
-
 
 #[tauri::command]
 pub fn open_base_image(
@@ -140,13 +165,22 @@ pub fn open_base_image(
         .unwrap_or("Untitled Design")
         .to_string();
 
+    let pid = format!("proj_{}", crate::storage::now_unix_millis());
+    let copied_path = crate::storage::copy_asset_into_project(&pid, &image_path)
+        .unwrap_or_else(|_| image_path.clone());
+    let proj_path = auto_project_file_path(&file_stem, &pid)?;
+
     let mut s = state.lock().map_err(|e| e.to_string())?;
     s.undo_stack.clear();
     s.redo_stack.clear();
     s.has_project = true;
     s.is_in_editor = true;
+    s.project_file_path = Some(proj_path.clone());
+    s.dirty = false;
     let id = s.next_id();
     s.current = ProjectSnapshot {
+        schema_version: crate::storage::CURRENT_SCHEMA_VERSION,
+        project_id: pid,
         project_name: file_stem.clone(),
         canvas_width: w,
         canvas_height: h,
@@ -180,13 +214,19 @@ pub fn open_base_image(
             mask_radius: 0,
             alpha_mask_path: None,
             kind: LayerKind::Image {
-                source_path: image_path,
+                source_path: copied_path,
                 bg_remove_color: None,
                 bg_remove_tolerance: 30,
             },
         }],
     };
-    render_and_respond(&mut s)
+    if let Ok(json) = serde_json::to_string_pretty(&s.current) {
+        let _ = crate::storage::atomic_write_str(Path::new(&proj_path), &json);
+    }
+    crate::storage::write_session_lock();
+    let resp = render_and_respond(&mut s)?;
+    let _ = crate::storage::record_recent_project(&proj_path, &s.current, None);
+    Ok(resp)
 }
 
 
@@ -210,6 +250,11 @@ pub fn add_image_overlay_layer(
         .to_string();
 
     let mut s = state.lock().map_err(|e| e.to_string())?;
+    if s.current.project_id.trim().is_empty() {
+        s.current.project_id = format!("proj_{}", crate::storage::now_unix_millis());
+    }
+    let stored_path = crate::storage::copy_asset_into_project(&s.current.project_id, &image_path)
+        .unwrap_or(image_path);
     s.push_undo();
     let id = s.next_id();
     s.current.layers.push(Layer {
@@ -238,7 +283,7 @@ pub fn add_image_overlay_layer(
         mask_radius: 0,
         alpha_mask_path: None,
         kind: LayerKind::Image {
-            source_path: image_path,
+            source_path: stored_path,
             bg_remove_color: None,
             bg_remove_tolerance: 30,
         },
@@ -553,6 +598,11 @@ pub fn replace_image_layer(
         .to_string();
 
     let mut s = state.lock().map_err(|e| e.to_string())?;
+    if s.current.project_id.trim().is_empty() {
+        s.current.project_id = format!("proj_{}", crate::storage::now_unix_millis());
+    }
+    let stored_path = crate::storage::copy_asset_into_project(&s.current.project_id, &image_path)
+        .unwrap_or(image_path);
     s.push_undo();
     let layer = s
         .current
@@ -564,7 +614,7 @@ pub fn replace_image_layer(
     layer.name = name;
     match &mut layer.kind {
         LayerKind::Image { source_path, .. } => {
-            *source_path = image_path;
+            *source_path = stored_path;
         }
         _ => return Err("Selected layer is not an Image layer.".to_string()),
     }
@@ -1097,7 +1147,7 @@ pub fn export_configured(
     Ok(dest_path)
 }
 
-fn save_image_formatted(
+pub fn save_image_formatted(
     img: &image::DynamicImage,
     dest: &Path,
     format: &str,
@@ -1296,37 +1346,96 @@ pub fn trim_transparency(
 
 #[tauri::command]
 pub fn save_autosave(state: tauri::State<'_, SharedProjectState>) -> Result<String, String> {
-    let snapshot = {
+    let (snapshot, file_path) = {
         let s = state.lock().map_err(|e| e.to_string())?;
         if !s.has_project {
             return Ok(String::new());
         }
-        s.current.clone()
+        (s.current.clone(), s.project_file_path.clone())
     };
-    let dir = appdata_subdir("autosave")?;
+    let dir = crate::storage::ensure_subdir("autosave")?;
     let dest = dir.join("autosave.veltrax");
     let json = serde_json::to_string(&snapshot).map_err(|e| e.to_string())?;
-    std::fs::write(&dest, json).map_err(|e| e.to_string())?;
+    crate::storage::atomic_write_str(&dest, &json)?;
+
+    let meta = crate::storage::AutosaveMeta {
+        project_name: snapshot.project_name.clone(),
+        project_file_path: file_path,
+        saved_at: crate::storage::now_unix_secs(),
+        unexpected_exit: true,
+    };
+    if let Ok(meta_json) = serde_json::to_string(&meta) {
+        let _ = crate::storage::atomic_write_str(&dir.join("autosave_meta.json"), &meta_json);
+    }
+    crate::storage::write_session_lock();
     Ok(dest.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-pub fn check_autosave() -> Result<Option<String>, String> {
-    let dir = appdata_subdir("autosave")?;
+pub fn check_autosave() -> Result<Option<crate::storage::AutosaveMeta>, String> {
+    let dir = crate::storage::ensure_subdir("autosave")?;
     let dest = dir.join("autosave.veltrax");
-    if dest.is_file() {
-        Ok(Some(dest.to_string_lossy().to_string()))
-    } else {
-        Ok(None)
+    let lock = dir.join("session.lock");
+    if !dest.is_file() || !lock.is_file() {
+        return Ok(None);
+    }
+    let meta_path = dir.join("autosave_meta.json");
+    let (meta, _) = crate::storage::load_json_or_quarantine::<crate::storage::AutosaveMeta>(
+        &meta_path,
+        "autosave_meta.json",
+    );
+    Ok(Some(meta))
+}
+
+impl Default for crate::storage::AutosaveMeta {
+    fn default() -> Self {
+        Self {
+            project_name: "Recovered Project".to_string(),
+            project_file_path: None,
+            saved_at: 0,
+            unexpected_exit: true,
+        }
     }
 }
 
 #[tauri::command]
-pub fn clear_autosave() -> Result<(), String> {
-    let dir = appdata_subdir("autosave")?;
+pub fn recover_autosave(
+    state: tauri::State<'_, SharedProjectState>,
+) -> Result<ProjectResponse, String> {
+    let dir = crate::storage::ensure_subdir("autosave")?;
     let dest = dir.join("autosave.veltrax");
-    if dest.is_file() {
-        let _ = std::fs::remove_file(&dest);
+    let raw = std::fs::read_to_string(&dest)
+        .map_err(|e| format!("Failed to read autosave: {}", e))?;
+    let mut snapshot: ProjectSnapshot =
+        serde_json::from_str(&raw).map_err(|e| format!("Invalid autosave: {}", e))?;
+    let _ = crate::storage::migrate_snapshot_if_needed(&mut snapshot, None)?;
+
+    let meta_path = dir.join("autosave_meta.json");
+    let (meta, _) = crate::storage::load_json_or_quarantine::<crate::storage::AutosaveMeta>(
+        &meta_path,
+        "autosave_meta.json",
+    );
+
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.undo_stack.clear();
+    s.redo_stack.clear();
+    s.has_project = true;
+    s.is_in_editor = true;
+    s.project_file_path = meta.project_file_path;
+    s.dirty = true;
+    s.current = snapshot;
+    crate::storage::write_session_lock();
+    render_and_respond(&mut s)
+}
+
+#[tauri::command]
+pub fn clear_autosave() -> Result<(), String> {
+    let dir = crate::storage::ensure_subdir("autosave")?;
+    for f in ["autosave.veltrax", "autosave_meta.json", "session.lock"] {
+        let p = dir.join(f);
+        if p.is_file() {
+            let _ = std::fs::remove_file(&p);
+        }
     }
     Ok(())
 }
@@ -1335,14 +1444,44 @@ pub fn clear_autosave() -> Result<(), String> {
 pub fn save_project_file(
     state: tauri::State<'_, SharedProjectState>,
     dest_path: String,
-) -> Result<String, String> {
-    let snapshot = {
-        let s = state.lock().map_err(|e| e.to_string())?;
-        s.current.clone()
+) -> Result<ProjectResponse, String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    if s.current.project_id.trim().is_empty() {
+        s.current.project_id = format!("proj_{}", crate::storage::now_unix_millis());
+    }
+    s.current.schema_version = crate::storage::CURRENT_SCHEMA_VERSION;
+    let json = serde_json::to_string_pretty(&s.current).map_err(|e| e.to_string())?;
+    crate::storage::atomic_write_str(Path::new(&dest_path), &json)
+        .map_err(|e| format!("Failed to save project: {}", e))?;
+    s.project_file_path = Some(dest_path.clone());
+    s.dirty = false;
+    let _ = crate::storage::record_recent_project(&dest_path, &s.current, None);
+    Ok(s.to_response())
+}
+
+#[tauri::command]
+pub fn save_current_project(
+    state: tauri::State<'_, SharedProjectState>,
+) -> Result<ProjectResponse, String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    if !s.has_project {
+        return Err("No active project.".to_string());
+    }
+    if s.current.project_id.trim().is_empty() {
+        s.current.project_id = format!("proj_{}", crate::storage::now_unix_millis());
+    }
+    s.current.schema_version = crate::storage::CURRENT_SCHEMA_VERSION;
+    let dest_path = match &s.project_file_path {
+        Some(p) if !p.is_empty() => p.clone(),
+        _ => auto_project_file_path(&s.current.project_name, &s.current.project_id)?,
     };
-    let json = serde_json::to_string_pretty(&snapshot).map_err(|e| e.to_string())?;
-    std::fs::write(&dest_path, json).map_err(|e| format!("Failed to save project: {}", e))?;
-    Ok(dest_path)
+    let json = serde_json::to_string_pretty(&s.current).map_err(|e| e.to_string())?;
+    crate::storage::atomic_write_str(Path::new(&dest_path), &json)
+        .map_err(|e| format!("Failed to save project: {}", e))?;
+    s.project_file_path = Some(dest_path.clone());
+    s.dirty = false;
+    let _ = crate::storage::record_recent_project(&dest_path, &s.current, None);
+    Ok(s.to_response())
 }
 
 #[tauri::command]
@@ -1352,16 +1491,57 @@ pub fn load_project_file(
 ) -> Result<ProjectResponse, String> {
     let raw = std::fs::read_to_string(&source_path)
         .map_err(|e| format!("Failed to read project '{}': {}", source_path, e))?;
-    let snapshot: ProjectSnapshot =
+    let mut snapshot: ProjectSnapshot =
         serde_json::from_str(&raw).map_err(|e| format!("Invalid .veltrax project: {}", e))?;
+
+    let migrated_note =
+        crate::storage::migrate_snapshot_if_needed(&mut snapshot, Some(Path::new(&source_path)))?;
+    let assets_migrated = crate::storage::migrate_snapshot_assets(&mut snapshot);
+    if migrated_note.is_some() || assets_migrated {
+        if let Ok(json) = serde_json::to_string_pretty(&snapshot) {
+            let _ = crate::storage::atomic_write_str(Path::new(&source_path), &json);
+        }
+    }
 
     let mut s = state.lock().map_err(|e| e.to_string())?;
     s.undo_stack.clear();
     s.redo_stack.clear();
     s.has_project = true;
     s.is_in_editor = true;
+    s.project_file_path = Some(source_path.clone());
+    s.dirty = false;
     s.current = snapshot;
-    render_and_respond(&mut s)
+    crate::storage::write_session_lock();
+    let resp = render_and_respond(&mut s)?;
+    let _ = crate::storage::record_recent_project(&source_path, &s.current, None);
+    Ok(resp)
+}
+
+#[derive(serde::Serialize)]
+pub struct MissingAssetInfo {
+    pub layer_id: String,
+    pub layer_name: String,
+    pub source_path: String,
+}
+
+#[tauri::command]
+pub fn check_missing_assets(
+    state: tauri::State<'_, SharedProjectState>,
+) -> Result<Vec<MissingAssetInfo>, String> {
+    let s = state.lock().map_err(|e| e.to_string())?;
+    let mut missing = Vec::new();
+    for l in &s.current.layers {
+        if let LayerKind::Image { source_path, .. } = &l.kind {
+            if !Path::new(source_path).is_file() {
+                missing.push(MissingAssetInfo {
+                    layer_id: l.id.clone(),
+                    layer_name: l.name.clone(),
+                    source_path: source_path.clone(),
+                });
+            }
+        }
+    }
+    Ok(missing)
 }
 
 
@@ -1563,14 +1743,8 @@ pub fn get_brand_kit() -> Result<BrandKit, String> {
     let root = user_data_root();
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     let path = root.join("brand_kit.json");
-    if path.is_file() {
-        if let Ok(raw) = std::fs::read_to_string(&path) {
-            if let Ok(kit) = serde_json::from_str::<BrandKit>(&raw) {
-                return Ok(kit);
-            }
-        }
-    }
-    Ok(BrandKit::default())
+    let (kit, _) = crate::storage::load_json_or_quarantine::<BrandKit>(&path, "brand_kit.json");
+    Ok(kit)
 }
 
 #[tauri::command]
@@ -1582,7 +1756,7 @@ pub fn save_brand_kit(colors: Vec<String>, recent_colors: Vec<String>) -> Result
         recent_colors,
     };
     let json = serde_json::to_string_pretty(&kit).map_err(|e| e.to_string())?;
-    std::fs::write(root.join("brand_kit.json"), json).map_err(|e| e.to_string())?;
+    crate::storage::atomic_write_str(&root.join("brand_kit.json"), &json)?;
     Ok(kit)
 }
 
@@ -1711,18 +1885,19 @@ pub fn add_image_bytes_layer(
         .decode(raw_b64.trim())
         .map_err(|e| format!("Invalid base64 image: {}", e))?;
 
-    let pasted_dir = user_data_root().join("pasted");
-    std::fs::create_dir_all(&pasted_dir).map_err(|e| e.to_string())?;
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    if s.current.project_id.trim().is_empty() {
+        s.current.project_id = format!("proj_{}", crate::storage::now_unix_millis());
+    }
+    let assets_dir = crate::storage::project_assets_dir(&s.current.project_id)?;
+    let ms = crate::storage::now_unix_millis();
     let safe_name = Path::new(&filename)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("pasted.png");
-    let dest = pasted_dir.join(format!("{}_{}", ms, safe_name));
-    std::fs::write(&dest, &bytes).map_err(|e| format!("Failed to save pasted image: {}", e))?;
+    let dest = assets_dir.join(format!("{}_{}", ms, safe_name));
+    crate::storage::atomic_write_bytes(&dest, &bytes)
+        .map_err(|e| format!("Failed to save pasted image: {}", e))?;
 
     let _ = image::open(&dest).map_err(|e| format!("Unsupported image format: {}", e))?;
     let layer_name = Path::new(safe_name)
@@ -1731,7 +1906,6 @@ pub fn add_image_bytes_layer(
         .unwrap_or("Pasted Image")
         .to_string();
 
-    let mut s = state.lock().map_err(|e| e.to_string())?;
     s.push_undo();
     let id = s.next_id();
     s.current.layers.push(Layer {

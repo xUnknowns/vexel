@@ -1,9 +1,9 @@
 <script>
-  import { X, FolderOpen, Instagram, LayoutGrid, Monitor } from 'lucide-svelte';
+  import { X, FolderOpen, Instagram, LayoutGrid, Monitor, Sparkles } from 'lucide-svelte';
 
-  let { show, onClose, onOpenFile, onCreatePreset } = $props();
+  let { show, templates = [], onSelectTemplate, onClose, onOpenFile, onCreatePreset } = $props();
 
-  let category = $state('open'); // 'open' | 'social' | 'video' | 'custom'
+  let category = $state('templates'); // 'templates' | 'open' | 'social' | 'video' | 'custom'
   let customW = $state(1920);
   let customH = $state(1080);
   let transparentBg = $state(false);
@@ -37,6 +37,7 @@
   }
 
   const categories = [
+    { id: 'templates', label: 'Templates', icon: Sparkles },
     { id: 'open', label: 'Open Local File', icon: FolderOpen },
     { id: 'social', label: 'Social & Logos', icon: Instagram },
     { id: 'video', label: 'Video & Thumbnails', icon: Monitor },
@@ -78,7 +79,24 @@
         </aside>
 
         <div class="preset-col">
-          {#if category === 'open'}
+          {#if category === 'templates'}
+            <div class="preset-grid">
+              {#each templates as tpl}
+                <button class="preset-card" onclick={() => onSelectTemplate && onSelectTemplate(tpl)}>
+                  <div class="preset-thumb" style="background:var(--bg-canvas); border-color:var(--border); overflow:hidden;">
+                    {#if tpl.preview_data_url}
+                      <img src={tpl.preview_data_url} alt={tpl.name} style="width:100%; height:100%; object-fit:cover;" />
+                    {:else}
+                      <Sparkles size={22} />
+                    {/if}
+                  </div>
+                  <span class="preset-label">{tpl.name}</span>
+                  <span class="preset-sub">{tpl.category} · {tpl.canvas_width} × {tpl.canvas_height}</span>
+                </button>
+              {/each}
+            </div>
+
+          {:else if category === 'open'}
             <div class="open-pane">
               <div class="open-icon-wrap">
                 <FolderOpen size={36} strokeWidth={1.25} />

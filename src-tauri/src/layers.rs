@@ -252,8 +252,16 @@ pub struct LayerGroup {
     pub collapsed: bool,
 }
 
+fn default_schema_version() -> u32 {
+    1
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectSnapshot {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub project_id: String,
     pub project_name: String,
     pub canvas_width: u32,
     pub canvas_height: u32,
@@ -276,6 +284,8 @@ pub struct BgGradient {
 impl Default for ProjectSnapshot {
     fn default() -> Self {
         Self {
+            schema_version: 2,
+            project_id: String::new(),
             project_name: "Untitled Design".to_string(),
             canvas_width: 1280,
             canvas_height: 720,
@@ -296,6 +306,8 @@ pub struct ProjectState {
     pub redo_stack: Vec<ProjectSnapshot>,
     pub preview_path: String,
     pub next_layer_seq: u64,
+    pub project_file_path: Option<String>,
+    pub dirty: bool,
 }
 
 impl Default for ProjectState {
@@ -308,6 +320,8 @@ impl Default for ProjectState {
             redo_stack: Vec::new(),
             preview_path: String::new(),
             next_layer_seq: 1,
+            project_file_path: None,
+            dirty: false,
         }
     }
 }
@@ -318,6 +332,8 @@ pub type SharedProjectState = Arc<Mutex<ProjectState>>;
 pub struct ProjectResponse {
     pub preview_path: String,
     pub project_name: String,
+    pub project_file_path: Option<String>,
+    pub dirty: bool,
     pub canvas_width: u32,
     pub canvas_height: u32,
     pub transparent_bg: bool,
@@ -338,6 +354,7 @@ impl ProjectState {
     }
 
     pub fn push_undo(&mut self) {
+        self.dirty = true;
         self.undo_stack.push(self.current.clone());
         if self.undo_stack.len() > 40 {
             self.undo_stack.remove(0);
@@ -349,6 +366,8 @@ impl ProjectState {
         ProjectResponse {
             preview_path: self.preview_path.clone(),
             project_name: self.current.project_name.clone(),
+            project_file_path: self.project_file_path.clone(),
+            dirty: self.dirty,
             canvas_width: self.current.canvas_width,
             canvas_height: self.current.canvas_height,
             transparent_bg: self.current.transparent_bg,
@@ -616,8 +635,28 @@ pub fn render_layer_kind(kind: &LayerKind) -> Result<RgbaImage, String> {
             bg_remove_color,
             bg_remove_tolerance,
         } => {
-            let img = image::open(source_path)
-                .map_err(|e| format!("Failed to open '{}': {}", source_path, e))?;
+            let Ok(img) = image::open(source_path) else {
+                // Missing asset placeholder so projects never fail to open
+                let (pw, ph) = (240u32, 160u32);
+                let mut ph_img = RgbaImage::from_pixel(pw, ph, Rgba([30, 41, 59, 230]));
+                for x in 0..pw {
+                    for b in 0..3 {
+                        ph_img.put_pixel(x, b, Rgba([239, 68, 68, 255]));
+                        ph_img.put_pixel(x, ph - 1 - b, Rgba([239, 68, 68, 255]));
+                    }
+                }
+                for y in 0..ph {
+                    for b in 0..3 {
+                        ph_img.put_pixel(b, y, Rgba([239, 68, 68, 255]));
+                        ph_img.put_pixel(pw - 1 - b, y, Rgba([239, 68, 68, 255]));
+                    }
+                    let d1 = ((y as f32 / ph as f32) * pw as f32) as u32;
+                    let d2 = pw.saturating_sub(1 + d1);
+                    if d1 < pw { ph_img.put_pixel(d1, y, Rgba([239, 68, 68, 200])); }
+                    if d2 < pw { ph_img.put_pixel(d2, y, Rgba([239, 68, 68, 200])); }
+                }
+                return Ok(ph_img);
+            };
             let mut rgba = img.to_rgba8();
             if let Some(target) = bg_remove_color {
                 let tol = *bg_remove_tolerance as i32;
